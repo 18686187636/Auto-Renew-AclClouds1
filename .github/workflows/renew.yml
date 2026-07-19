@@ -40,28 +40,71 @@ jobs:
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      # ================= 代理配置（手动 sing-box）=================
+      # ================= 代理配置（手动 sing-box，含重试机制）=================
       - name: 🌐 下载并启动 sing-box 代理
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           set -e
 
-          # 1. 下载 sing-box 静态二进制（Linux amd64）
+          # 1. 下载 sing-box 静态二进制（Linux amd64）—— 带重试和备用源
           echo "📦 下载 sing-box 最新版本..."
-          # 优先使用官方固定 latest 链接（避免 GitHub API 限流）
-          if wget -q -O sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.tar.gz; then
-            echo "✅ 下载成功"
-          else
-            echo "⚠️ 直接下载失败，尝试通过 GitHub API 获取..."
-            LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.assets[] | select(.name | test("linux-amd64")) | .browser_download_url')
-            if [ -z "$LATEST_URL" ]; then
-              echo "❌ 获取下载链接失败"
-              exit 1
+          DOWNLOAD_SUCCESS=false
+          MAX_RETRIES=5
+          RETRY_DELAY=3
+
+          # 方案 A：直接从 latest 重定向下载（带重试）
+          for ((i=1; i<=MAX_RETRIES; i++)); do
+            echo "尝试 $i/$MAX_RETRIES: 使用 latest 重定向下载..."
+            if curl -L --fail --retry 2 --retry-delay 2 -o sing-box.tar.gz \
+              https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.tar.gz; then
+              if [ -s sing-box.tar.gz ]; then
+                DOWNLOAD_SUCCESS=true
+                echo "✅ 直接下载成功"
+                break
+              fi
             fi
-            wget -q -O sing-box.tar.gz "$LATEST_URL"
+            sleep $RETRY_DELAY
+          done
+
+          # 方案 B：如果直接下载失败，尝试 GitHub API 获取具体版本号（带重试）
+          if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
+            echo "⚠️ 直接下载失败，尝试通过 GitHub API 获取最新版本..."
+            for ((i=1; i<=MAX_RETRIES; i++)); do
+              echo "尝试 $i/$MAX_RETRIES: 通过 API 获取下载链接..."
+              LATEST_URL=$(curl -s -H "User-Agent: GitHub-Action" \
+                https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+                | jq -r '.assets[] | select(.name | test("linux-amd64")) | .browser_download_url')
+              if [ -n "$LATEST_URL" ]; then
+                if curl -L --fail --retry 2 --retry-delay 2 -o sing-box.tar.gz "$LATEST_URL"; then
+                  if [ -s sing-box.tar.gz ]; then
+                    DOWNLOAD_SUCCESS=true
+                    echo "✅ API 下载成功"
+                    break
+                  fi
+                fi
+              fi
+              sleep $RETRY_DELAY
+            done
           fi
 
+          # 方案 C：若上述均失败，尝试使用固定版本号（如 v1.13.14）
+          if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
+            echo "⚠️ 使用固定版本 v1.13.14 作为备用..."
+            FALLBACK_URL="https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-linux-amd64.tar.gz"
+            if curl -L --fail -o sing-box.tar.gz "$FALLBACK_URL" && [ -s sing-box.tar.gz ]; then
+              DOWNLOAD_SUCCESS=true
+              echo "✅ 备用版本下载成功"
+            fi
+          fi
+
+          # 最终检查
+          if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
+            echo "❌ 所有下载方式均失败，请检查网络或手动指定版本。"
+            exit 1
+          fi
+
+          # 解压并安装
           tar -xzf sing-box.tar.gz
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
@@ -76,54 +119,45 @@ jobs:
               print("❌ NODE_LINK 环境变量为空", file=sys.stderr)
               sys.exit(1)
 
-          # 拆分协议和内容
           if '://' not in link:
               print(f"❌ 无效的链接格式: {link}", file=sys.stderr)
               sys.exit(1)
           proto, rest = link.split('://', 1)
 
-          # 移除片段（#之后）
           rest = rest.split('#', 1)[0]
 
-          # 分离认证信息 (auth@) 与 主机端口+参数
           if '@' in rest:
               auth, rest = rest.split('@', 1)
           else:
               auth = ""
 
-          # 分离主机端口 和 查询参数
           if '?' in rest:
               host_port, params_str = rest.split('?', 1)
           else:
               host_port, params_str = rest, ""
 
-          # 处理主机和端口（支持 IPv6 方括号）
           host = ""
           port = ""
           if host_port.startswith('[') and ']' in host_port:
-              # IPv6 格式: [2602:...]:54552
               host = host_port.split(']', 1)[0][1:]
               remaining = host_port.split(']', 1)[1]
               if remaining.startswith(':'):
                   port = remaining[1:]
               else:
-                  port = "54552"  # 默认端口（视情况）
+                  port = "54552"
           else:
-              # IPv4 或域名格式: server:port
               if ':' in host_port:
                   host, port = host_port.split(':', 1)
               else:
                   host = host_port
-                  port = "443"   # 默认 hysteria2 端口
+                  port = "443"
 
           if not host or not port:
               print(f"❌ 无法解析主机或端口: host='{host}', port='{port}'", file=sys.stderr)
               sys.exit(1)
 
-          # 解析查询参数（自动 URL 解码）
           params = dict(urllib.parse.parse_qsl(params_str))
 
-          # 构建 sing-box outbound（hysteria2）
           outbound = {
               "type": "hysteria2",
               "tag": "proxy",
@@ -134,7 +168,6 @@ jobs:
               "password": auth,
           }
 
-          # TLS 配置
           tls = {"enabled": True}
           sni = params.get("sni", "")
           if sni:
@@ -149,7 +182,6 @@ jobs:
 
           outbound["tls"] = tls
 
-          # 完整配置（使用 SOCKS5 入站，端口 1080）
           config = {
               "log": {"level": "info"},
               "inbounds": [
@@ -163,7 +195,6 @@ jobs:
                   }
               ],
               "outbounds": [outbound],
-              # 不定义 route，默认使用第一个 outbound
           }
 
           with open("sing-box-config.json", "w") as f:
@@ -183,7 +214,6 @@ jobs:
           # 4. 后台启动 sing-box
           echo "🚀 启动 sing-box 代理..."
           nohup sing-box run -c sing-box-config.json > sing-box.log 2>&1 &
-          # 等待代理启动并监听端口
           for i in {1..10}; do
             if ss -lnt | grep -q ":1080"; then
               echo "✅ 代理已启动（SOCKS5 127.0.0.1:1080）"
@@ -197,11 +227,10 @@ jobs:
             exit 1
           fi
 
-          # 5. 设置环境变量供后续步骤使用（写入 $GITHUB_ENV）
+          # 5. 设置环境变量供后续步骤使用
           echo "IS_PROXY=true" >> $GITHUB_ENV
           echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
 
-          # 可选：打印出口 IP 验证（使用 curl 通过代理）
           echo "📍 代理出口 IP："
           curl --socks5 127.0.0.1:1080 -s https://api.ip.sb/ip || echo "获取 IP 失败"
       # ================= 代理配置结束 =================
@@ -212,7 +241,6 @@ jobs:
           PASSWORD: ${{ secrets.PASSWORD }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # IS_PROXY 和 PROXY_SERVER 已由上一步写入环境
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1366x768x24" \
             python3 app.py
