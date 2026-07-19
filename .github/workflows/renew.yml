@@ -141,7 +141,8 @@ jobs:
           pin = params.get("pinSHA256", "")
           if pin:
               pin = urllib.parse.unquote(pin)
-              tls["pin_sha256"] = pin
+              # 修正字段名：pin_sha256 → certificate_pin
+              tls["certificate_pin"] = pin
 
           outbound["tls"] = tls
 
@@ -154,7 +155,6 @@ jobs:
                       "tag": "socks-in",
                       "listen": "127.0.0.1",
                       "listen_port": 1080,
-                      # 已移除 sniff 和 sniff_override_destination
                   }
               ],
               "outbounds": [outbound],
