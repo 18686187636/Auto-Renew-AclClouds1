@@ -108,7 +108,7 @@ jobs:
               "password": auth,
           }
 
-          # TLS 配置（忽略 pinSHA256，因为 insecure=true 时固定无效）
+          # TLS 配置（忽略 pinSHA256，因为 insecure=true 时无效）
           tls = {"enabled": True}
           sni = params.get("sni", "")
           if sni:
@@ -116,10 +116,10 @@ jobs:
           insecure_val = params.get("insecure", "0") or params.get("allowInsecure", "0")
           if insecure_val in ("1", "true"):
               tls["insecure"] = True
-          # 不再添加 pin_sha256 或 certificate_pin
 
           outbound["tls"] = tls
 
+          # 极简配置（无 route，所有流量走唯一 outbound）
           config = {
               "log": {"level": "info"},
               "inbounds": [
@@ -131,11 +131,6 @@ jobs:
                   }
               ],
               "outbounds": [outbound],
-              "route": {
-                  "sniff": True,
-                  "sniff_override_destination": True,
-                  "final": "proxy"
-              }
           }
 
           with open("sing-box-config.json", "w") as f:
