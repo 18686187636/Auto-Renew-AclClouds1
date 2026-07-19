@@ -40,7 +40,7 @@ jobs:
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      # ================= 代理配置（直接下载固定版本）=================
+      # ================= 代理配置（固定版本 + 新版配置）=================
       - name: 🌐 下载并启动 sing-box 代理
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
@@ -50,10 +50,8 @@ jobs:
           # 1. 下载指定版本的 sing-box（稳定版 v1.13.14）
           echo "📦 下载 sing-box v1.13.14 ..."
           VERSION="1.13.14"
-          # 正确文件名格式：sing-box-${VERSION}-linux-amd64.tar.gz
           URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
           
-          # 带重试下载
           for i in {1..3}; do
             echo "尝试 $i/3: 下载 $URL"
             if wget -q --show-progress -O sing-box.tar.gz "$URL"; then
@@ -70,12 +68,11 @@ jobs:
             exit 1
           fi
 
-          # 解压并安装
           tar -xzf sing-box.tar.gz
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
 
-          # 2. 用 Python 解析 NODE_LINK 并生成 sing-box 配置文件
+          # 2. 用 Python 解析 NODE_LINK 并生成 sing-box 配置文件（兼容新版）
           echo "🔧 生成 sing-box 配置..."
           python3 << 'EOF'
           import urllib.parse, json, sys, os
@@ -148,6 +145,7 @@ jobs:
 
           outbound["tls"] = tls
 
+          # 新版配置：inbound 中移除 sniff 字段，改用 route
           config = {
               "log": {"level": "info"},
               "inbounds": [
@@ -156,11 +154,15 @@ jobs:
                       "tag": "socks-in",
                       "listen": "127.0.0.1",
                       "listen_port": 1080,
-                      "sniff": True,
-                      "sniff_override_destination": True,
+                      # 已移除 sniff 和 sniff_override_destination
                   }
               ],
               "outbounds": [outbound],
+              "route": {
+                  "sniff": True,
+                  "sniff_override_destination": True,
+                  "final": "proxy"
+              }
           }
 
           with open("sing-box-config.json", "w") as f:
