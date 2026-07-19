@@ -3,7 +3,7 @@ name: Auto-Renew-ACL
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 23 */3 * *'   # 每隔3天 UTC 23:00 运行
+    - cron: '0 23 */3 * *'
 
 jobs:
   Renew-acl:
@@ -26,67 +26,46 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xvfb \
-            x11-utils \
-            xdotool \
-            scrot \
-            fonts-noto-cjk \
-            jq \
-            wget \
-            curl
+            xvfb x11-utils xdotool scrot fonts-noto-cjk \
+            jq wget curl
 
       - name: 🐍 安装 Python 依赖
         run: |
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      # ================= 代理配置（固定版本 + 新版配置）=================
       - name: 🌐 下载并启动 sing-box 代理
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           set -e
 
-          # 1. 下载指定版本的 sing-box（稳定版 v1.13.14）
           echo "📦 下载 sing-box v1.13.14 ..."
           VERSION="1.13.14"
           URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
-          
           for i in {1..3}; do
-            echo "尝试 $i/3: 下载 $URL"
-            if wget -q --show-progress -O sing-box.tar.gz "$URL"; then
-              if [ -s sing-box.tar.gz ]; then
-                echo "✅ 下载成功"
-                break
-              fi
+            echo "尝试 $i/3"
+            if wget -q --show-progress -O sing-box.tar.gz "$URL" && [ -s sing-box.tar.gz ]; then
+              echo "✅ 下载成功"; break
             fi
             sleep 2
           done
-          
-          if [ ! -s sing-box.tar.gz ]; then
-            echo "❌ 下载失败，请检查网络或版本号"
-            exit 1
-          fi
+          [ -s sing-box.tar.gz ] || { echo "❌ 下载失败"; exit 1; }
 
           tar -xzf sing-box.tar.gz
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
 
-          # 2. 用 Python 解析 NODE_LINK 并生成 sing-box 配置文件（兼容新版）
           echo "🔧 生成 sing-box 配置..."
           python3 << 'EOF'
           import urllib.parse, json, sys, os
 
           link = os.environ.get('NODE_LINK', '').strip()
           if not link:
-              print("❌ NODE_LINK 环境变量为空", file=sys.stderr)
+              print("❌ NODE_LINK 为空", file=sys.stderr)
               sys.exit(1)
 
-          if '://' not in link:
-              print(f"❌ 无效的链接格式: {link}", file=sys.stderr)
-              sys.exit(1)
           proto, rest = link.split('://', 1)
-
           rest = rest.split('#', 1)[0]
 
           if '@' in rest:
@@ -99,28 +78,26 @@ jobs:
           else:
               host_port, params_str = rest, ""
 
+          # 解析 host 和 port（支持 IPv6）
           host = ""
           port = ""
           if host_port.startswith('[') and ']' in host_port:
               host = host_port.split(']', 1)[0][1:]
               remaining = host_port.split(']', 1)[1]
-              if remaining.startswith(':'):
-                  port = remaining[1:]
-              else:
-                  port = "54552"
+              port = remaining[1:] if remaining.startswith(':') else "54552"
           else:
               if ':' in host_port:
                   host, port = host_port.split(':', 1)
               else:
-                  host = host_port
-                  port = "443"
+                  host, port = host_port, "443"
 
           if not host or not port:
-              print(f"❌ 无法解析主机或端口: host='{host}', port='{port}'", file=sys.stderr)
+              print(f"❌ 解析失败: host='{host}', port='{port}'", file=sys.stderr)
               sys.exit(1)
 
           params = dict(urllib.parse.parse_qsl(params_str))
 
+          # 构建 outbound
           outbound = {
               "type": "hysteria2",
               "tag": "proxy",
@@ -131,6 +108,7 @@ jobs:
               "password": auth,
           }
 
+          # TLS 配置（忽略 pinSHA256，因为 insecure=true 时固定无效）
           tls = {"enabled": True}
           sni = params.get("sni", "")
           if sni:
@@ -138,15 +116,10 @@ jobs:
           insecure_val = params.get("insecure", "0") or params.get("allowInsecure", "0")
           if insecure_val in ("1", "true"):
               tls["insecure"] = True
-          pin = params.get("pinSHA256", "")
-          if pin:
-              pin = urllib.parse.unquote(pin)
-              # 修正字段名：pin_sha256 → certificate_pin
-              tls["certificate_pin"] = pin
+          # 不再添加 pin_sha256 或 certificate_pin
 
           outbound["tls"] = tls
 
-          # 新版配置：inbound 中移除 sniff 字段，改用 route
           config = {
               "log": {"level": "info"},
               "inbounds": [
@@ -168,23 +141,21 @@ jobs:
           with open("sing-box-config.json", "w") as f:
               json.dump(config, f, indent=2)
 
-          print("✅ sing-box 配置文件生成成功")
+          print("✅ 配置生成成功")
           EOF
 
-          # 3. 检查配置文件是否合法
           echo "🔍 验证配置..."
           if ! sing-box check -c sing-box-config.json; then
-              echo "❌ sing-box 配置校验失败，内容如下："
+              echo "❌ 校验失败，配置内容："
               cat sing-box-config.json
               exit 1
           fi
 
-          # 4. 后台启动 sing-box
-          echo "🚀 启动 sing-box 代理..."
+          echo "🚀 启动代理..."
           nohup sing-box run -c sing-box-config.json > sing-box.log 2>&1 &
           for i in {1..10}; do
             if ss -lnt | grep -q ":1080"; then
-              echo "✅ 代理已启动（SOCKS5 127.0.0.1:1080）"
+              echo "✅ 代理已启动 (SOCKS5 127.0.0.1:1080)"
               break
             fi
             sleep 1
@@ -195,13 +166,11 @@ jobs:
             exit 1
           fi
 
-          # 5. 设置环境变量供后续步骤使用
           echo "IS_PROXY=true" >> $GITHUB_ENV
           echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
 
-          echo "📍 代理出口 IP："
-          curl --socks5 127.0.0.1:1080 -s https://api.ip.sb/ip || echo "获取 IP 失败"
-      # ================= 代理配置结束 =================
+          echo "📍 出口 IP："
+          curl --socks5 127.0.0.1:1080 -s https://api.ip.sb/ip || echo "获取失败"
 
       - name: 🚀 运行续期脚本
         env:
@@ -213,7 +182,7 @@ jobs:
           xvfb-run --auto-servernum --server-args="-screen 0 1366x768x24" \
             python3 app.py
 
-      - name: 🧹 清理旧的工作流运行记录
+      - name: 🧹 清理旧记录
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -223,7 +192,6 @@ jobs:
           for run_id in $runs; do
             count=$((count + 1))
             if [ $count -gt 1 ]; then
-              echo "删除运行记录: $run_id"
               gh run delete $run_id || true
             fi
           done
