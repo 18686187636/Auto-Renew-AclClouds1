@@ -34,7 +34,7 @@ jobs:
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      - name: 🌐 下载并启动 sing-box 代理（极简稳定版）
+      - name: 🌐 下载并启动 sing-box 代理（IPv6 强制 + debug）
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
@@ -56,7 +56,7 @@ jobs:
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
 
-          echo "🔧 生成 sing-box 配置（极简版）..."
+          echo "🔧 生成 sing-box 配置（IPv6 强制）..."
           python3 << 'EOF'
           import urllib.parse, json, sys, os
 
@@ -96,6 +96,7 @@ jobs:
 
           params = dict(urllib.parse.parse_qsl(params_str))
 
+          # 构建 outbound（强制 IPv6 解析）
           outbound = {
               "type": "hysteria2",
               "tag": "proxy",
@@ -104,6 +105,7 @@ jobs:
               "up_mbps": 100,
               "down_mbps": 100,
               "password": auth,
+              "domain_strategy": "ipv6_only",   # 强制 IPv6
           }
 
           tls = {"enabled": True}
@@ -115,8 +117,9 @@ jobs:
               tls["insecure"] = True
           outbound["tls"] = tls
 
+          # 极简配置，仅 inbounds + outbounds，无 route
           config = {
-              "log": {"level": "info"},
+              "log": {"level": "debug"},   # 启用 debug 日志
               "inbounds": [
                   {
                       "type": "socks",
@@ -131,7 +134,7 @@ jobs:
           with open("sing-box-config.json", "w") as f:
               json.dump(config, f, indent=2)
 
-          print("✅ 配置生成成功（极简版）")
+          print("✅ 配置生成成功（IPv6 强制）")
           EOF
 
           echo "🔍 验证配置..."
@@ -156,14 +159,24 @@ jobs:
             exit 1
           fi
 
-          echo "📋 sing-box 日志（前 30 行）："
-          head -n 30 sing-box.log
+          # 输出完整日志（便于调试）
+          echo "📋 sing-box 完整日志："
+          cat sing-box.log
 
+          # 设置环境变量
           echo "IS_PROXY=true" >> $GITHUB_ENV
           echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
 
-          echo "📍 代理出口 IP："
-          curl --socks5 127.0.0.1:1080 -s https://api.ip.sb/ip || echo "⚠️ 获取 IP 失败，继续执行"
+          # 测试代理连通性（强制要求成功）
+          echo "🔍 测试代理能否访问目标站..."
+          if curl --socks5 127.0.0.1:1080 -s -o /dev/null -w "%{http_code}" https://dash.aclclouds.com | grep -q "200"; then
+            echo "✅ 代理可访问目标站"
+          else
+            echo "❌ 代理无法访问目标站，请检查节点配置。"
+            echo "----- sing-box 日志尾部 -----"
+            tail -n 50 sing-box.log
+            exit 1
+          fi
 
       - name: 🚀 运行续期脚本
         env:
@@ -175,7 +188,7 @@ jobs:
           xvfb-run --auto-servernum --server-args="-screen 0 1366x768x24" \
             python3 app.py
 
-      - name: 🧹 清理旧的工作流运行记录
+      - name: 🧹 清理旧记录
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -185,7 +198,6 @@ jobs:
           for run_id in $runs; do
             count=$((count + 1))
             if [ $count -gt 1 ]; then
-              echo "删除运行记录: $run_id"
               gh run delete $run_id || true
             fi
           done
