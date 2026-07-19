@@ -261,20 +261,14 @@ def extract_date_like(text):
 def extract_duration_like(text):
     if not text:
         return ''
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    for idx, line in enumerate(lines):
-        if re.search(r'expires\s+in|剩余|还有', line, re.I) and idx + 1 < len(lines):
-            return f"{line} {lines[idx + 1]}"
-    match = re.search(
-        r'(?:expires\s+in\s*)?\d+\s*(?:d|day|days|j|天|日)\s*\d*\s*(?:h|hour|hours|小时)?',
-        text,
-        re.I,
-    )
-    if match:
-        return match.group(0).strip()
-    match = re.search(r'\d+\s*(?:h|hour|hours|小时)', text, re.I)
-    if match:
-        return match.group(0).strip()
+    patterns = [
+        r'Expires\s+in\s+(\d+[jJ]\s*\d*[hH]?)',
+        r'(\d+[jJ]\s*\d*[hH]?)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            return match.group(0).strip()
     return ''
 
 def get_project_name(card, idx):
@@ -302,9 +296,11 @@ def get_project_name(card, idx):
     return f"项目 #{idx}"
 
 def get_project_expiry(card):
-    # 打印卡片全文以便调试
     card_text = element_text(card)
     print(f"🔍 卡片全文预览 (前300字符): {card_text[:300]}")
+    expiry_text = extract_duration_like(card_text)
+    if expiry_text:
+        return expiry_text
     selectors = [
         '.projects-expiry-value',
         '[class*="expiry"]',
@@ -330,13 +326,6 @@ def get_project_expiry(card):
                     return text
         except Exception:
             continue
-    # 尝试从整段文本中提取日期
-    date_text = extract_date_like(card_text)
-    if date_text:
-        return date_text
-    duration_text = extract_duration_like(card_text)
-    if duration_text:
-        return duration_text
     return '未知'
 
 def get_renewal_available_note(card):
@@ -819,66 +808,26 @@ def get_current_ip(proxy_server: str = "") -> str:
             continue
     raise Exception("所有 IP 检测服务均失败")
 
-# ---------- 代理可用性测试 ----------
-def test_proxy(proxy_server: str, test_url: str = "https://dash.aclclouds.com", timeout: int = 10) -> bool:
-    """尝试通过代理访问测试URL，返回是否成功"""
-    if not proxy_server:
-        return False
-    proxies = {"http": proxy_server, "https": proxy_server}
-    try:
-        response = requests.get(test_url, proxies=proxies, timeout=timeout, allow_redirects=True)
-        if response.status_code == 200:
-            print(f"✅ 代理可访问 {test_url} (状态码 {response.status_code})")
-            return True
-        else:
-            print(f"⚠️ 代理访问 {test_url} 返回状态码 {response.status_code}")
-            return False
-    except Exception as e:
-        print(f"❌ 代理测试失败: {e}")
-        return False
-
-# ---------- 主函数 ----------
+# ---------- 主函数（强制使用代理）----------
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     raw_proxy = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or ""
     PROXY_SERVER = format_proxy_url(raw_proxy) if raw_proxy else ""
 
-    # 如果启用了代理，先测试代理是否可用
-    proxy_effective = False
+    sb_options = {'uc': True, 'headless': False}
     if IS_PROXY and PROXY_SERVER:
-        print(f"🔗 挂载代理: {PROXY_SERVER}")
-        # 测试代理能否访问目标网站
-        if test_proxy(PROXY_SERVER, "https://dash.aclclouds.com"):
-            proxy_effective = True
-        else:
-            print("⚠️ 代理测试失败，将使用直连模式")
-            # 清除代理设置
-            PROXY_SERVER = ""
-            IS_PROXY = False
+        sb_options['proxy'] = PROXY_SERVER
+        print(f"🔗 使用代理: {PROXY_SERVER}")
     else:
         print("🍭 未使用代理，直连访问")
 
-    sb_options = {'uc': True, 'headless': False}
-    if proxy_effective:
-        sb_options['proxy'] = PROXY_SERVER
-        print(f"✅ 使用代理: {PROXY_SERVER}")
-    else:
-        print("🍭 使用直连")
-
     with SB(**sb_options) as sb:
-        # 获取出口IP（仅当代理有效时才尝试）
-        if proxy_effective:
-            try:
-                ip = get_current_ip(PROXY_SERVER)
-                print(f"📍 当前出口IP: {ip}")
-            except Exception as e:
-                print(f"⚠️ 获取出口IP失败: {e}")
-        else:
-            try:
-                ip = get_current_ip("")
-                print(f"📍 当前出口IP (直连): {ip}")
-            except Exception as e:
-                print(f"⚠️ 获取出口IP失败: {e}")
+        # 尝试获取出口IP（仅用于日志，失败不影响）
+        try:
+            ip = get_current_ip(PROXY_SERVER if IS_PROXY and PROXY_SERVER else "")
+            print(f"📍 当前出口IP: {ip}")
+        except Exception as e:
+            print(f"⚠️ 获取出口IP失败: {e}")
 
         sb.set_window_size(1366, 768)
 
@@ -902,11 +851,10 @@ def main():
             send_telegram("⚠️ 未能确认登录状态，请检查账号密码配置。")
             return
 
-        # 2. 进入项目页并等待卡片加载
+        # 进入项目页并等待卡片加载
         sb.open(PROJECTS_URL)
         sb.wait_for_ready_state_complete()
         time.sleep(3)
-        # 显式等待卡片出现
         try:
             sb.wait_for_element_present('.projects-card', timeout=15)
             print("✅ 检测到项目卡片元素")
@@ -915,7 +863,6 @@ def main():
             sb.save_screenshot('no_cards.png')
         time.sleep(2)
 
-        # 3. 定位卡片
         cards = find_project_cards(sb)
 
         if not cards:
