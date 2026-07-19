@@ -34,7 +34,7 @@ jobs:
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      - name: 🌐 下载并启动 sing-box 代理
+      - name: 🌐 下载并启动 sing-box 代理（极简稳定版）
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
@@ -78,7 +78,6 @@ jobs:
           else:
               host_port, params_str = rest, ""
 
-          # 解析 host 和 port（支持 IPv6 方括号）
           host = ""
           port = ""
           if host_port.startswith('[') and ']' in host_port:
@@ -97,7 +96,6 @@ jobs:
 
           params = dict(urllib.parse.parse_qsl(params_str))
 
-          # 构建 outbound（hysteria2）
           outbound = {
               "type": "hysteria2",
               "tag": "proxy",
@@ -108,7 +106,6 @@ jobs:
               "password": auth,
           }
 
-          # TLS 配置
           tls = {"enabled": True}
           sni = params.get("sni", "")
           if sni:
@@ -116,10 +113,8 @@ jobs:
           insecure_val = params.get("insecure", "0") or params.get("allowInsecure", "0")
           if insecure_val in ("1", "true"):
               tls["insecure"] = True
-          # 不添加 pin_sha256 等
           outbound["tls"] = tls
 
-          # 极简配置（无 route，无额外 outbound）
           config = {
               "log": {"level": "info"},
               "inbounds": [
@@ -161,7 +156,6 @@ jobs:
             exit 1
           fi
 
-          # 打印日志前 30 行
           echo "📋 sing-box 日志（前 30 行）："
           head -n 30 sing-box.log
 
@@ -181,7 +175,7 @@ jobs:
           xvfb-run --auto-servernum --server-args="-screen 0 1366x768x24" \
             python3 app.py
 
-      - name: 🧹 清理旧记录
+      - name: 🧹 清理旧的工作流运行记录
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -191,6 +185,7 @@ jobs:
           for run_id in $runs; do
             count=$((count + 1))
             if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
               gh run delete $run_id || true
             fi
           done
