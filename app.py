@@ -808,21 +808,25 @@ def get_current_ip(proxy_server: str = "") -> str:
             continue
     raise Exception("所有 IP 检测服务均失败")
 
-# ---------- 主函数（强制使用代理）----------
+# ---------- 强制代理，不可用时直接报错 ----------
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     raw_proxy = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or ""
     PROXY_SERVER = format_proxy_url(raw_proxy) if raw_proxy else ""
 
+    # 如果要求使用代理，但未配置或配置无效，直接终止
+    if IS_PROXY and not PROXY_SERVER:
+        raise Exception("IS_PROXY=true 但未设置有效的 PROXY_SERVER")
+
     sb_options = {'uc': True, 'headless': False}
     if IS_PROXY and PROXY_SERVER:
         sb_options['proxy'] = PROXY_SERVER
-        print(f"🔗 使用代理: {PROXY_SERVER}")
+        print(f"🔗 强制使用代理: {PROXY_SERVER}")
     else:
         print("🍭 未使用代理，直连访问")
 
     with SB(**sb_options) as sb:
-        # 尝试获取出口IP（仅用于日志，失败不影响）
+        # 获取出口 IP（仅日志，失败不影响）
         try:
             ip = get_current_ip(PROXY_SERVER if IS_PROXY and PROXY_SERVER else "")
             print(f"📍 当前出口IP: {ip}")
@@ -861,6 +865,9 @@ def main():
         except Exception as e:
             print(f"⚠️ 等待卡片超时: {e}")
             sb.save_screenshot('no_cards.png')
+            # 如果强制代理且卡片加载失败，很可能代理不通，主动报错
+            if IS_PROXY:
+                raise Exception("代理可能导致页面加载失败，请检查代理配置或节点可用性。")
         time.sleep(2)
 
         cards = find_project_cards(sb)
