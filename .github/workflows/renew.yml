@@ -32,14 +32,15 @@ jobs:
             scrot \
             fonts-noto-cjk \
             jq \
-            wget
+            wget \
+            curl
 
       - name: 🐍 安装 Python 依赖
         run: |
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      # ========== 新增：手动配置 sing-box 代理（替代 setup_proxy.sh） ==========
+      # ================= 代理配置（手动 sing-box）=================
       - name: 🌐 下载并启动 sing-box 代理
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
@@ -48,12 +49,19 @@ jobs:
 
           # 1. 下载 sing-box 静态二进制（Linux amd64）
           echo "📦 下载 sing-box 最新版本..."
-          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.assets[] | select(.name | test("linux-amd64")) | .browser_download_url')
-          if [ -z "$LATEST_URL" ]; then
-            echo "❌ 获取下载链接失败"
-            exit 1
+          # 优先使用官方固定 latest 链接（避免 GitHub API 限流）
+          if wget -q -O sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.tar.gz; then
+            echo "✅ 下载成功"
+          else
+            echo "⚠️ 直接下载失败，尝试通过 GitHub API 获取..."
+            LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.assets[] | select(.name | test("linux-amd64")) | .browser_download_url')
+            if [ -z "$LATEST_URL" ]; then
+              echo "❌ 获取下载链接失败"
+              exit 1
+            fi
+            wget -q -O sing-box.tar.gz "$LATEST_URL"
           fi
-          wget -q -O sing-box.tar.gz "$LATEST_URL"
+
           tar -xzf sing-box.tar.gz
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
@@ -61,7 +69,7 @@ jobs:
           # 2. 用 Python 解析 NODE_LINK 并生成 sing-box 配置文件
           echo "🔧 生成 sing-box 配置..."
           python3 << 'EOF'
-          import urllib.parse, json, re, sys, os
+          import urllib.parse, json, sys, os
 
           link = os.environ.get('NODE_LINK', '').strip()
           if not link:
@@ -95,7 +103,6 @@ jobs:
           if host_port.startswith('[') and ']' in host_port:
               # IPv6 格式: [2602:...]:54552
               host = host_port.split(']', 1)[0][1:]
-              # 剩下部分可能以 ':' 开头后跟端口
               remaining = host_port.split(']', 1)[1]
               if remaining.startswith(':'):
                   port = remaining[1:]
@@ -132,14 +139,11 @@ jobs:
           sni = params.get("sni", "")
           if sni:
               tls["server_name"] = sni
-          # insecure / allowInsecure
           insecure_val = params.get("insecure", "0") or params.get("allowInsecure", "0")
           if insecure_val in ("1", "true"):
               tls["insecure"] = True
-          # pinSHA256 需要将 %3A 还原为冒号（可能还有其它编码，但此处简单替换）
           pin = params.get("pinSHA256", "")
           if pin:
-              # URL 解码（urllib.parse.unquote 更通用）
               pin = urllib.parse.unquote(pin)
               tls["pin_sha256"] = pin
 
@@ -159,16 +163,7 @@ jobs:
                   }
               ],
               "outbounds": [outbound],
-              "route": {
-                  "rules": [
-                      {
-                          "protocol": ["dns"],
-                          "outbound": "dns-out"
-                      }
-                  ],
-                  "final": "proxy"
-              },
-              # 如果不想用 DNS 可删，但保留空对象
+              # 不定义 route，默认使用第一个 outbound
           }
 
           with open("sing-box-config.json", "w") as f:
@@ -209,7 +204,7 @@ jobs:
           # 可选：打印出口 IP 验证（使用 curl 通过代理）
           echo "📍 代理出口 IP："
           curl --socks5 127.0.0.1:1080 -s https://api.ip.sb/ip || echo "获取 IP 失败"
-      # ========== 代理设置结束 ==========
+      # ================= 代理配置结束 =================
 
       - name: 🚀 运行续期脚本
         env:
