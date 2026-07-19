@@ -40,67 +40,33 @@ jobs:
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      # ================= 代理配置（手动 sing-box，含重试机制）=================
+      # ================= 代理配置（直接下载固定版本）=================
       - name: 🌐 下载并启动 sing-box 代理
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           set -e
 
-          # 1. 下载 sing-box 静态二进制（Linux amd64）—— 带重试和备用源
-          echo "📦 下载 sing-box 最新版本..."
-          DOWNLOAD_SUCCESS=false
-          MAX_RETRIES=5
-          RETRY_DELAY=3
-
-          # 方案 A：直接从 latest 重定向下载（带重试）
-          for ((i=1; i<=MAX_RETRIES; i++)); do
-            echo "尝试 $i/$MAX_RETRIES: 使用 latest 重定向下载..."
-            if curl -L --fail --retry 2 --retry-delay 2 -o sing-box.tar.gz \
-              https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.tar.gz; then
+          # 1. 下载指定版本的 sing-box（稳定版 v1.13.14）
+          echo "📦 下载 sing-box v1.13.14 ..."
+          VERSION="1.13.14"
+          # 正确文件名格式：sing-box-${VERSION}-linux-amd64.tar.gz
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
+          
+          # 带重试下载
+          for i in {1..3}; do
+            echo "尝试 $i/3: 下载 $URL"
+            if wget -q --show-progress -O sing-box.tar.gz "$URL"; then
               if [ -s sing-box.tar.gz ]; then
-                DOWNLOAD_SUCCESS=true
-                echo "✅ 直接下载成功"
+                echo "✅ 下载成功"
                 break
               fi
             fi
-            sleep $RETRY_DELAY
+            sleep 2
           done
-
-          # 方案 B：如果直接下载失败，尝试 GitHub API 获取具体版本号（带重试）
-          if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
-            echo "⚠️ 直接下载失败，尝试通过 GitHub API 获取最新版本..."
-            for ((i=1; i<=MAX_RETRIES; i++)); do
-              echo "尝试 $i/$MAX_RETRIES: 通过 API 获取下载链接..."
-              LATEST_URL=$(curl -s -H "User-Agent: GitHub-Action" \
-                https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-                | jq -r '.assets[] | select(.name | test("linux-amd64")) | .browser_download_url')
-              if [ -n "$LATEST_URL" ]; then
-                if curl -L --fail --retry 2 --retry-delay 2 -o sing-box.tar.gz "$LATEST_URL"; then
-                  if [ -s sing-box.tar.gz ]; then
-                    DOWNLOAD_SUCCESS=true
-                    echo "✅ API 下载成功"
-                    break
-                  fi
-                fi
-              fi
-              sleep $RETRY_DELAY
-            done
-          fi
-
-          # 方案 C：若上述均失败，尝试使用固定版本号（如 v1.13.14）
-          if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
-            echo "⚠️ 使用固定版本 v1.13.14 作为备用..."
-            FALLBACK_URL="https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-linux-amd64.tar.gz"
-            if curl -L --fail -o sing-box.tar.gz "$FALLBACK_URL" && [ -s sing-box.tar.gz ]; then
-              DOWNLOAD_SUCCESS=true
-              echo "✅ 备用版本下载成功"
-            fi
-          fi
-
-          # 最终检查
-          if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
-            echo "❌ 所有下载方式均失败，请检查网络或手动指定版本。"
+          
+          if [ ! -s sing-box.tar.gz ]; then
+            echo "❌ 下载失败，请检查网络或版本号"
             exit 1
           fi
 
