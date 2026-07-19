@@ -1,8 +1,9 @@
 name: Auto-Renew-ACL
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 23 */3 * *' # 每隔3天 12点(UTC 2点) 运行
+    - cron: '0 23 */3 * *'   # 每隔3天 UTC 23:00 运行
 
 jobs:
   Renew-acl:
@@ -11,14 +12,16 @@ jobs:
     permissions:
       contents: write
       actions: write
+
     steps:
       - name: 📥 下载代码
         uses: actions/checkout@v6
+
       - name: 🐍 设置 Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-          
+
       - name: 🛠️ 安装系统依赖
         run: |
           sudo apt-get update
@@ -27,30 +30,198 @@ jobs:
             x11-utils \
             xdotool \
             scrot \
-            fonts-noto-cjk
-            
+            fonts-noto-cjk \
+            jq \
+            wget
+
       - name: 🐍 安装 Python 依赖
         run: |
           pip install seleniumbase aiohttp requests
           seleniumbase install chromedriver
 
-      - name: 🌐 设置sing-box代理转发
-        continue-on-error: true
+      # ========== 新增：手动配置 sing-box 代理（替代 setup_proxy.sh） ==========
+      - name: 🌐 下载并启动 sing-box 代理
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
-          
+          set -e
+
+          # 1. 下载 sing-box 静态二进制（Linux amd64）
+          echo "📦 下载 sing-box 最新版本..."
+          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.assets[] | select(.name | test("linux-amd64")) | .browser_download_url')
+          if [ -z "$LATEST_URL" ]; then
+            echo "❌ 获取下载链接失败"
+            exit 1
+          fi
+          wget -q -O sing-box.tar.gz "$LATEST_URL"
+          tar -xzf sing-box.tar.gz
+          sudo mv sing-box-*/sing-box /usr/local/bin/
+          sing-box version
+
+          # 2. 用 Python 解析 NODE_LINK 并生成 sing-box 配置文件
+          echo "🔧 生成 sing-box 配置..."
+          python3 << 'EOF'
+          import urllib.parse, json, re, sys, os
+
+          link = os.environ.get('NODE_LINK', '').strip()
+          if not link:
+              print("❌ NODE_LINK 环境变量为空", file=sys.stderr)
+              sys.exit(1)
+
+          # 拆分协议和内容
+          if '://' not in link:
+              print(f"❌ 无效的链接格式: {link}", file=sys.stderr)
+              sys.exit(1)
+          proto, rest = link.split('://', 1)
+
+          # 移除片段（#之后）
+          rest = rest.split('#', 1)[0]
+
+          # 分离认证信息 (auth@) 与 主机端口+参数
+          if '@' in rest:
+              auth, rest = rest.split('@', 1)
+          else:
+              auth = ""
+
+          # 分离主机端口 和 查询参数
+          if '?' in rest:
+              host_port, params_str = rest.split('?', 1)
+          else:
+              host_port, params_str = rest, ""
+
+          # 处理主机和端口（支持 IPv6 方括号）
+          host = ""
+          port = ""
+          if host_port.startswith('[') and ']' in host_port:
+              # IPv6 格式: [2602:...]:54552
+              host = host_port.split(']', 1)[0][1:]
+              # 剩下部分可能以 ':' 开头后跟端口
+              remaining = host_port.split(']', 1)[1]
+              if remaining.startswith(':'):
+                  port = remaining[1:]
+              else:
+                  port = "54552"  # 默认端口（视情况）
+          else:
+              # IPv4 或域名格式: server:port
+              if ':' in host_port:
+                  host, port = host_port.split(':', 1)
+              else:
+                  host = host_port
+                  port = "443"   # 默认 hysteria2 端口
+
+          if not host or not port:
+              print(f"❌ 无法解析主机或端口: host='{host}', port='{port}'", file=sys.stderr)
+              sys.exit(1)
+
+          # 解析查询参数（自动 URL 解码）
+          params = dict(urllib.parse.parse_qsl(params_str))
+
+          # 构建 sing-box outbound（hysteria2）
+          outbound = {
+              "type": "hysteria2",
+              "tag": "proxy",
+              "server": host,
+              "server_port": int(port),
+              "up_mbps": 100,
+              "down_mbps": 100,
+              "password": auth,
+          }
+
+          # TLS 配置
+          tls = {"enabled": True}
+          sni = params.get("sni", "")
+          if sni:
+              tls["server_name"] = sni
+          # insecure / allowInsecure
+          insecure_val = params.get("insecure", "0") or params.get("allowInsecure", "0")
+          if insecure_val in ("1", "true"):
+              tls["insecure"] = True
+          # pinSHA256 需要将 %3A 还原为冒号（可能还有其它编码，但此处简单替换）
+          pin = params.get("pinSHA256", "")
+          if pin:
+              # URL 解码（urllib.parse.unquote 更通用）
+              pin = urllib.parse.unquote(pin)
+              tls["pin_sha256"] = pin
+
+          outbound["tls"] = tls
+
+          # 完整配置（使用 SOCKS5 入站，端口 1080）
+          config = {
+              "log": {"level": "info"},
+              "inbounds": [
+                  {
+                      "type": "socks",
+                      "tag": "socks-in",
+                      "listen": "127.0.0.1",
+                      "listen_port": 1080,
+                      "sniff": True,
+                      "sniff_override_destination": True,
+                  }
+              ],
+              "outbounds": [outbound],
+              "route": {
+                  "rules": [
+                      {
+                          "protocol": ["dns"],
+                          "outbound": "dns-out"
+                      }
+                  ],
+                  "final": "proxy"
+              },
+              # 如果不想用 DNS 可删，但保留空对象
+          }
+
+          with open("sing-box-config.json", "w") as f:
+              json.dump(config, f, indent=2)
+
+          print("✅ sing-box 配置文件生成成功")
+          EOF
+
+          # 3. 检查配置文件是否合法
+          echo "🔍 验证配置..."
+          if ! sing-box check -c sing-box-config.json; then
+              echo "❌ sing-box 配置校验失败，内容如下："
+              cat sing-box-config.json
+              exit 1
+          fi
+
+          # 4. 后台启动 sing-box
+          echo "🚀 启动 sing-box 代理..."
+          nohup sing-box run -c sing-box-config.json > sing-box.log 2>&1 &
+          # 等待代理启动并监听端口
+          for i in {1..10}; do
+            if ss -lnt | grep -q ":1080"; then
+              echo "✅ 代理已启动（SOCKS5 127.0.0.1:1080）"
+              break
+            fi
+            sleep 1
+          done
+          if ! ss -lnt | grep -q ":1080"; then
+            echo "❌ 代理启动失败，查看日志："
+            cat sing-box.log
+            exit 1
+          fi
+
+          # 5. 设置环境变量供后续步骤使用（写入 $GITHUB_ENV）
+          echo "IS_PROXY=true" >> $GITHUB_ENV
+          echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
+
+          # 可选：打印出口 IP 验证（使用 curl 通过代理）
+          echo "📍 代理出口 IP："
+          curl --socks5 127.0.0.1:1080 -s https://api.ip.sb/ip || echo "获取 IP 失败"
+      # ========== 代理设置结束 ==========
+
       - name: 🚀 运行续期脚本
         env:
           EMAIL: ${{ secrets.EMAIL }}
           PASSWORD: ${{ secrets.PASSWORD }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # IS_PROXY 和 PROXY_SERVER 已由上一步写入环境
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1366x768x24" \
             python3 app.py
-          
+
       - name: 🧹 清理旧的工作流运行记录
         if: always()
         env:
