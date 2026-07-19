@@ -21,12 +21,11 @@ LOGIN_PATH = '/auth/login'
 BASE_URL = 'https://dash.aclclouds.com'
 PROJECTS_URL = f'{BASE_URL}/dashboard/projects'
 
-# ---------- 新增：IPv6 地址格式化函数 ----------
+# ---------- IPv6 地址格式化函数 ----------
 def format_proxy_url(proxy_url):
     """
     确保代理 URL 中的 IPv6 地址被方括号括起来，
     以供 SeleniumBase / requests 正确解析。
-    支持形如 socks5://[2001:db8::1]:1080 或 socks5://user:pass@[2001:db8::1]:1080 的输入。
     """
     if not proxy_url or '://' not in proxy_url:
         return proxy_url
@@ -38,7 +37,7 @@ def format_proxy_url(proxy_url):
     if '@' in rest:
         userpass, hostport = rest.split('@', 1)
 
-    # 如果主机部分包含多个冒号且不以 '[' 开头，则判定为 IPv6 地址
+    # 如果主机部分包含多个冒号且不以 '[' 开头，则判定为 IPv6
     if hostport.count(':') >= 2 and not hostport.startswith('['):
         # 尝试分离端口（最后一个冒号后的数字）
         parts = hostport.rsplit(':', 1)
@@ -52,14 +51,12 @@ def format_proxy_url(proxy_url):
             if ':' in hostport:
                 hostport = f'[{hostport}]'
 
-    # 重新拼装
     if userpass:
         rest = f'{userpass}@{hostport}'
     else:
         rest = hostport
 
     return f'{protocol}://{rest}'
-# ---------- 新增结束 ----------
 
 def beijing_time_str():
     try:
@@ -887,9 +884,7 @@ def get_current_ip(proxy_server: str = "") -> str:
 
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
-    # 读取代理地址，支持多种环境变量名
     raw_proxy = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or ""
-    # 格式化 IPv6 地址（增加方括号）
     PROXY_SERVER = format_proxy_url(raw_proxy) if raw_proxy else ""
 
     sb_options = {'uc': True, 'headless': False}
