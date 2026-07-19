@@ -797,7 +797,7 @@ def login(sb, email, password):
         print(f"登录过程异常: {e}")
         return False
 
-# ---------- 改进后的 get_current_ip 支持多服务 ----------
+# ---------- 多服务 IP 检测 ----------
 def get_current_ip(proxy_server: str = "") -> str:
     proxies = None
     if proxy_server:
@@ -819,25 +819,66 @@ def get_current_ip(proxy_server: str = "") -> str:
             continue
     raise Exception("所有 IP 检测服务均失败")
 
+# ---------- 代理可用性测试 ----------
+def test_proxy(proxy_server: str, test_url: str = "https://dash.aclclouds.com", timeout: int = 10) -> bool:
+    """尝试通过代理访问测试URL，返回是否成功"""
+    if not proxy_server:
+        return False
+    proxies = {"http": proxy_server, "https": proxy_server}
+    try:
+        response = requests.get(test_url, proxies=proxies, timeout=timeout, allow_redirects=True)
+        if response.status_code == 200:
+            print(f"✅ 代理可访问 {test_url} (状态码 {response.status_code})")
+            return True
+        else:
+            print(f"⚠️ 代理访问 {test_url} 返回状态码 {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ 代理测试失败: {e}")
+        return False
+
+# ---------- 主函数 ----------
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     raw_proxy = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or ""
     PROXY_SERVER = format_proxy_url(raw_proxy) if raw_proxy else ""
 
-    sb_options = {'uc': True, 'headless': False}
+    # 如果启用了代理，先测试代理是否可用
+    proxy_effective = False
     if IS_PROXY and PROXY_SERVER:
-        sb_options['proxy'] = PROXY_SERVER
         print(f"🔗 挂载代理: {PROXY_SERVER}")
+        # 测试代理能否访问目标网站
+        if test_proxy(PROXY_SERVER, "https://dash.aclclouds.com"):
+            proxy_effective = True
+        else:
+            print("⚠️ 代理测试失败，将使用直连模式")
+            # 清除代理设置
+            PROXY_SERVER = ""
+            IS_PROXY = False
     else:
         print("🍭 未使用代理，直连访问")
 
+    sb_options = {'uc': True, 'headless': False}
+    if proxy_effective:
+        sb_options['proxy'] = PROXY_SERVER
+        print(f"✅ 使用代理: {PROXY_SERVER}")
+    else:
+        print("🍭 使用直连")
+
     with SB(**sb_options) as sb:
-        # 尝试获取出口 IP，失败不中断
-        try:
-            ip = get_current_ip(PROXY_SERVER if IS_PROXY and PROXY_SERVER else "")
-            print(f"📍 当前出口IP: {ip}")
-        except Exception as e:
-            print(f"⚠️ 获取出口IP失败: {e}")
+        # 获取出口IP（仅当代理有效时才尝试）
+        if proxy_effective:
+            try:
+                ip = get_current_ip(PROXY_SERVER)
+                print(f"📍 当前出口IP: {ip}")
+            except Exception as e:
+                print(f"⚠️ 获取出口IP失败: {e}")
+        else:
+            try:
+                ip = get_current_ip("")
+                print(f"📍 当前出口IP (直连): {ip}")
+            except Exception as e:
+                print(f"⚠️ 获取出口IP失败: {e}")
 
         sb.set_window_size(1366, 768)
 
@@ -871,7 +912,8 @@ def main():
             print("✅ 检测到项目卡片元素")
         except Exception as e:
             print(f"⚠️ 等待卡片超时: {e}")
-        time.sleep(2)  # 额外缓冲
+            sb.save_screenshot('no_cards.png')
+        time.sleep(2)
 
         # 3. 定位卡片
         cards = find_project_cards(sb)
@@ -879,8 +921,6 @@ def main():
         if not cards:
             print("❌ 未找到项目卡片。")
             log_projects_page_diagnostics(sb)
-            # 保存截图以便调试
-            sb.save_screenshot('no_cards.png')
             send_telegram("⚠️ 未找到项目卡片，请检查页面结构。")
             return
 
