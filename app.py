@@ -11,7 +11,7 @@ from selenium.common.exceptions import ElementClickInterceptedException, WebDriv
 from selenium.webdriver.common.by import By
 from zoneinfo import ZoneInfo
 
-# ----- 配置（从环境变量读取） -----
+# ----- 配置 -----
 EMAIL = os.getenv('EMAIL') or ""
 PASSWORD = os.getenv('PASSWORD') or ""
 TG_CHAT_ID = os.getenv('TG_CHAT_ID') or ""
@@ -21,7 +21,7 @@ LOGIN_PATH = '/auth/login'
 BASE_URL = 'https://dash.aclclouds.com'
 PROJECTS_URL = f'{BASE_URL}/dashboard/projects'
 
-# ---------- IPv6 地址格式化 ----------
+# ---------- IPv6 格式化 ----------
 def format_proxy_url(proxy_url):
     if not proxy_url or '://' not in proxy_url:
         return proxy_url
@@ -786,7 +786,7 @@ def login(sb, email, password):
         print(f"登录过程异常: {e}")
         return False
 
-# ---------- 多服务 IP 检测 ----------
+# ---------- IP 检测（多服务） ----------
 def get_current_ip(proxy_server: str = "") -> str:
     proxies = None
     if proxy_server:
@@ -808,27 +808,56 @@ def get_current_ip(proxy_server: str = "") -> str:
             continue
     raise Exception("所有 IP 检测服务均失败")
 
-# ---------- 强制代理，不可用时直接报错 ----------
+# ---------- 代理可用性测试 ----------
+def test_proxy(proxy_server: str, test_url: str = "https://dash.aclclouds.com", timeout: int = 10) -> bool:
+    """尝试通过代理访问测试URL，返回是否成功"""
+    if not proxy_server:
+        return False
+    proxies = {"http": proxy_server, "https": proxy_server}
+    try:
+        response = requests.get(test_url, proxies=proxies, timeout=timeout, allow_redirects=True)
+        if response.status_code == 200:
+            print(f"✅ 代理可访问 {test_url} (状态码 {response.status_code})")
+            return True
+        else:
+            print(f"⚠️ 代理访问 {test_url} 返回状态码 {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ 代理测试失败: {e}")
+        return False
+
+# ---------- 主函数（代理优先，失败自动降级） ----------
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     raw_proxy = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or ""
     PROXY_SERVER = format_proxy_url(raw_proxy) if raw_proxy else ""
 
-    # 如果要求使用代理，但未配置或配置无效，直接终止
-    if IS_PROXY and not PROXY_SERVER:
-        raise Exception("IS_PROXY=true 但未设置有效的 PROXY_SERVER")
+    # 默认不使用代理
+    use_proxy = False
+
+    if IS_PROXY and PROXY_SERVER:
+        print(f"🔗 检测到代理设置: {PROXY_SERVER}")
+        if test_proxy(PROXY_SERVER, "https://dash.aclclouds.com"):
+            use_proxy = True
+            print("✅ 代理可用，将使用代理。")
+        else:
+            print("⚠️ 代理不可用，将使用直连模式。")
+            # 向 Telegram 发送通知（可选）
+            send_telegram("⚠️ 代理不可用，本次任务将使用直连。")
+    else:
+        print("🍭 未配置代理，使用直连访问。")
 
     sb_options = {'uc': True, 'headless': False}
-    if IS_PROXY and PROXY_SERVER:
+    if use_proxy:
         sb_options['proxy'] = PROXY_SERVER
-        print(f"🔗 强制使用代理: {PROXY_SERVER}")
+        print(f"🌐 使用代理: {PROXY_SERVER}")
     else:
-        print("🍭 未使用代理，直连访问")
+        print("🌐 使用直连")
 
     with SB(**sb_options) as sb:
-        # 获取出口 IP（仅日志，失败不影响）
+        # 获取出口 IP（仅日志）
         try:
-            ip = get_current_ip(PROXY_SERVER if IS_PROXY and PROXY_SERVER else "")
+            ip = get_current_ip(PROXY_SERVER if use_proxy else "")
             print(f"📍 当前出口IP: {ip}")
         except Exception as e:
             print(f"⚠️ 获取出口IP失败: {e}")
@@ -855,7 +884,7 @@ def main():
             send_telegram("⚠️ 未能确认登录状态，请检查账号密码配置。")
             return
 
-        # 进入项目页并等待卡片加载
+        # 进入项目页
         sb.open(PROJECTS_URL)
         sb.wait_for_ready_state_complete()
         time.sleep(3)
@@ -865,9 +894,6 @@ def main():
         except Exception as e:
             print(f"⚠️ 等待卡片超时: {e}")
             sb.save_screenshot('no_cards.png')
-            # 如果强制代理且卡片加载失败，很可能代理不通，主动报错
-            if IS_PROXY:
-                raise Exception("代理可能导致页面加载失败，请检查代理配置或节点可用性。")
         time.sleep(2)
 
         cards = find_project_cards(sb)
