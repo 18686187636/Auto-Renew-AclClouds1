@@ -676,6 +676,7 @@ def build_success_message(project_name, old_expiry, new_expiry):
         f"⏱️ 新过期时间: {new_expiry}",
         f"👤 登录账户: {masked_email}",
         f"⏱️ 运行时间: {beijing_time_str()}",
+        f"https://aclclouds.com/",
     ]
     return "\n".join(lines)
 
@@ -688,6 +689,7 @@ def build_not_yet_due_message(project_name, expiry):
         f"⏱️ 当前过期时间: {expiry}",
         f"👤 登录账户: {masked_email}",
         f"⏱️ 运行时间: {beijing_time_str()}",
+        f"https://aclclouds.com/",
     ]
     return "\n".join(lines)
 
