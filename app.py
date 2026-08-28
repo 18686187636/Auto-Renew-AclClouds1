@@ -158,6 +158,13 @@ def find_elements(root, selector):
 def find_renew_buttons(root):
     selectors = [
         '.projects-renew-btn',
+        # 续期按钮已改为图标按钮，没有文字，只能靠 title / aria-label 识别
+        './/button['
+        'contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew") or '
+        'contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
+        './/button['
+        'contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate") or '
+        'contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate")]',
         './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
         './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate")]',
         './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
@@ -256,17 +263,20 @@ def extract_duration_like(text):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for idx, line in enumerate(lines):
         if re.search(r'expires\s+in|剩余|还有', line, re.I) and idx + 1 < len(lines):
-            return f"{line} {lines[idx + 1]}"
+            candidate = lines[idx + 1]
+            if extract_date_like(candidate) or re.search(r'\d', candidate):
+                # “Expires in”标签单独占一行，时长值在下一行，去掉标签只保留数值
+                return re.sub(r'^(?:expires\s*in|剩余|还有)\s*[:：]?\s*', '', candidate, flags=re.I).strip()
 
     match = re.search(
-        r'(?:expires\s+in\s*)?\d+\s*(?:d|day|days|j|天|日)\s*\d*\s*(?:h|hour|hours|小时)?',
+        r'(?:expires\s*in\s*)?(\d+\s*(?:days|day|d|j|天|日)\s*\d*\s*(?:hours|hour|h|小时)?)',
         text,
         re.I,
     )
     if match:
-        return match.group(0).strip()
+        return match.group(1).strip()
 
-    match = re.search(r'\d+\s*(?:h|hour|hours|小时)', text, re.I)
+    match = re.search(r'\d+\s*(?:hours|hour|h|小时)', text, re.I)
     if match:
         return match.group(0).strip()
 
@@ -300,6 +310,9 @@ def get_project_name(card, idx):
 def get_project_expiry(card):
     selectors = [
         '.projects-expiry-value',
+        '.projects-service-cell--expiry strong',
+        '[class*="expiry"] strong',
+        '[class*="expiry"] [class*="value"]',
         '[class*="expiry"]',
         '[class*="expire"]',
         '[class*="Expires"]',
@@ -392,6 +405,14 @@ def get_renew_note(card):
 
 def get_action_button_label(button):
     text = element_text(button)
+    # 图标按钮没有文字，从 title / aria-label 里取按钮含义
+    for attr in ('aria-label', 'title'):
+        try:
+            value = (button.get_attribute(attr) or '').strip()
+        except Exception:
+            value = ''
+        if value:
+            text = f"{text} {value}"
     lowered = text.lower()
     if 'reactivate' in lowered or '重新激活' in text or '恢复' in text:
         return 'Reactivate'
@@ -635,7 +656,7 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
             sb.sleep(0.8)
             continue
 
-        sb.sleep(1.2)
+        sb.sleep(4.5)
 
         try:
             checkbox = sb.driver.find_element(By.CSS_SELECTOR, 'div.auth-captcha-inner[role="checkbox"]')
