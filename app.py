@@ -22,12 +22,12 @@ BASE_URL = 'https://dash.aclclouds.com'
 PROJECTS_URL = f'{BASE_URL}/dashboard/projects'
 
 # ★ 多语言关键词
-EXPIRE_LABELS = ('Expire dans', 'Expires in', '到期', '过期')
-RENEW_KEYWORDS = ('renew', 'renouveler', 'renouvellement', '续期')
-REACTIVATE_KEYWORDS = ('reactivate', 'réactiver', 'reactiver', '重新激活', '恢复')
-MANAGE_KEYWORDS = ('manage', 'gérer', 'gerer', '管理')
-SUSPEND_KEYWORDS = ('suspended', 'suspendu', 'paused', 'en pause', '暂停')
+EXPIRE_LABELS = ('Expire dans', 'Expires in', 'Expire le', 'Expires on', '到期', '过期')
 SUCCESS_KEYWORDS = ('successfully', 'avec succès', 'réussi', 'succès', '成功')
+
+# XPath 大小写归一化用的字符映射
+_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ"
+_LOWER = "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"
 
 
 def beijing_time_str():
@@ -160,7 +160,11 @@ def dedupe_project_cards(cards):
         name = ''
         for line in text.splitlines():
             line = line.strip()
-            if line and not re.search(r'expire|expiry|renouvel|renew|réactiv|reactivat|suspend|pause|续期|重新激活|恢复|暂停|过期|到期', line, re.I):
+            if line and not re.search(
+                r'expire|expiry|renouvel|renew|réactiv|reactivat|suspend|pause|manage|gérer|gerer|'
+                r'续期|重新激活|恢复|暂停|过期|到期|管理',
+                line, re.I
+            ):
                 name = line
                 break
         signature = (name.lower(), get_project_expiry(card).lower())
@@ -173,7 +177,6 @@ def dedupe_project_cards(cards):
 
 
 def find_elements(root, selector):
-    # ★ 扩展：识别以 ( 开头的 XPath 和常见轴
     if selector.startswith(('/', './/', '(', 'ancestor', 'descendant', 'following', 'preceding')):
         by = By.XPATH
     else:
@@ -181,31 +184,52 @@ def find_elements(root, selector):
     return root.find_elements(by, selector)
 
 
+# ★ 新增：Manage / Gérer 按钮
+def find_manage_buttons(root):
+    selectors = [
+        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "manage")]',
+        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "gérer")]',
+        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "gerer")]',
+        f'.//a[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "manage")]',
+        f'.//a[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "gérer")]',
+        f'.//a[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "gerer")]',
+        './/button[contains(normalize-space(.), "管理")]',
+        './/a[contains(normalize-space(.), "管理")]',
+    ]
+    buttons = []
+    for selector in selectors:
+        try:
+            buttons.extend(find_elements(root, selector))
+        except Exception:
+            continue
+    return unique_elements(buttons)
+
+
 def find_renew_buttons(root):
     selectors = [
         '.projects-renew-btn',
-        # Renew / Renouveler（英/法）
-        './/button['
-        'contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "renew") or '
-        'contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "renouvel") or '
-        'contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "renew") or '
-        'contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "renouvel")]',
+        # Renew / Renouveler
+        f'.//button['
+        f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "renew") or '
+        f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "renouvel") or '
+        f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "renew") or '
+        f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "renouvel")]',
         # Reactivate / Réactiver
-        './/button['
-        'contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "reactivate") or '
-        'contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "réactiv") or '
-        'contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "reactivate") or '
-        'contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "réactiv")]',
+        f'.//button['
+        f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "reactivate") or '
+        f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "réactiv") or '
+        f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "reactivate") or '
+        f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "réactiv")]',
         # 文本匹配
-        './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "renew")]',
-        './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "renouvel")]',
-        './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "reactivate")]',
-        './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "réactiv")]',
+        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renew")]',
+        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renouvel")]',
+        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "reactivate")]',
+        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "réactiv")]',
         # 通用 role=button / a
-        './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "renew")]',
-        './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "renouvel")]',
-        './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "reactivate")]',
-        './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "réactiv")]',
+        f'.//*[(@role="button" or self::a) and contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renew")]',
+        f'.//*[(@role="button" or self::a) and contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renouvel")]',
+        f'.//*[(@role="button" or self::a) and contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "reactivate")]',
+        f'.//*[(@role="button" or self::a) and contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "réactiv")]',
     ]
     buttons = []
     for selector in selectors:
@@ -223,12 +247,12 @@ def find_card_container_from_child(sb, child):
         const start = arguments[0];
         if (!start) return null;
 
-        const stopTags = ['body', 'html', 'main', 'header', 'footer', 'nav', 'form'];
-        const hasExpire = (t) => /expire dans|expires in|expir|到期|过期/i.test(t);
-        const hasAction = (t) => /manage|gérer|gerer|renouveler|renew|réactiver|reactivate|supprimer|delete/i.test(t);
+        const stopTags = ['body', 'html', 'main', 'header', 'footer', 'nav', 'form', 'aside'];
+        const hasExpire = (t) => /expire dans|expires in|expire le|expires on|expir|到期|过期/i.test(t);
+        const actionRe = /\\b(manage|gérer|gerer|renouveler|renew|réactiver|reactivate|管理)\\b/gi;
 
         let node = start;
-        let fallback = null;
+        let best = null;
 
         for (let i = 0; node && i < 15; i += 1, node = node.parentElement) {
             if (node === start) continue;
@@ -237,58 +261,47 @@ def find_card_container_from_child(sb, child):
             if (stopTags.includes(tag)) break;
 
             const text = (node.innerText || '').trim();
-            if (text.length > 1000) break;
+            if (text.length > 600) break;
 
-            // 尺寸合理 + 含过期标签 + 含操作按钮 → 基本就是卡片
-            if (text.length >= 30 && text.length <= 600 && hasExpire(text) && hasAction(text)) {
+            const actionCount = (text.match(actionRe) || []).length;
+            if (actionCount > 1) break;
+
+            // 理想卡片：既有 expire 标签又有 action
+            if (hasExpire(text) && actionCount === 1 && text.length >= 20) {
                 return node;
             }
 
-            // 尺寸合理 + 含过期标签 + class 像卡片
-            const cls = (node.className || '').toString().toLowerCase();
-            if (text.length >= 30 && text.length <= 600 && hasExpire(text) &&
-                /card|project|service|server|item|row|vps|bot/.test(cls)) {
-                return node;
-            }
-
-            // 记下第一个满足最小条件的节点作为候选
-            if (!fallback && text.length >= 30 && text.length <= 600 && hasExpire(text)) {
-                fallback = node;
+            // 次选：只有一个 action + 文本长度合理（形如 "项目名\\nManage"）
+            if (actionCount === 1 && text.length >= 15 && text.length <= 300) {
+                best = node;
             }
         }
 
-        return fallback;
+        return best;
         ''',
         child,
     )
 
 
-# ★ 重写：以 "Expire dans" / "Expires in" 标签为锚点定位卡片
+# ★ 重写：锚点 = Manage 按钮 > 续期按钮 > 过期标签
 def find_project_cards(sb):
     cards = []
 
-    # 方法 1：以过期标签为锚点（法语 "Expire dans" / 英语 "Expires in"）
-    anchor_xpath = (
-        '//*[self::div or self::span or self::p or self::label or self::td or self::th]'
-        '[normalize-space(.) = "Expire dans" '
-        'or normalize-space(.) = "Expires in" '
-        'or normalize-space(.) = "到期" '
-        'or normalize-space(.) = "过期"]'
-    )
+    # 方法 1：以 Manage / Gérer 按钮为锚点（列表页每张卡片必有）
     try:
-        anchors = sb.driver.find_elements(By.XPATH, anchor_xpath)
+        manage_btns = find_manage_buttons(sb.driver)
     except Exception:
-        anchors = []
+        manage_btns = []
 
-    for anchor in anchors:
+    for btn in manage_btns:
         try:
-            card = find_card_container_from_child(sb, anchor)
+            card = find_card_container_from_child(sb, btn)
             if card is not None:
                 cards.append(card)
         except Exception:
             continue
 
-    # 方法 2：以续期/重新激活按钮为锚点（兜底）
+    # 方法 2：以续期 / 重新激活按钮为锚点
     if not cards:
         try:
             for button in find_renew_buttons(sb.driver):
@@ -300,6 +313,29 @@ def find_project_cards(sb):
                     continue
         except Exception:
             pass
+
+    # 方法 3：以过期标签为锚点（若卡片直接展示过期时间）
+    if not cards:
+        anchor_xpath = (
+            '//*[self::div or self::span or self::p or self::label or self::small or self::strong or self::td]'
+            '[normalize-space(.) = "Expire dans" '
+            'or normalize-space(.) = "Expires in" '
+            'or normalize-space(.) = "Expire le" '
+            'or normalize-space(.) = "Expires on" '
+            'or normalize-space(.) = "到期" '
+            'or normalize-space(.) = "过期"]'
+        )
+        try:
+            anchors = sb.driver.find_elements(By.XPATH, anchor_xpath)
+        except Exception:
+            anchors = []
+        for anchor in anchors:
+            try:
+                card = find_card_container_from_child(sb, anchor)
+                if card is not None:
+                    cards.append(card)
+            except Exception:
+                continue
 
     return dedupe_project_cards(cards)
 
@@ -318,22 +354,21 @@ def extract_date_like(text):
     return ''
 
 
-# ★ 扩展：支持法语 "4j 14h" / "3 jours 2 heures" / 英语 / 中文
+# ★ 支持法语 "4j 14h" / "3 jours 2 heures" / 英语 / 中文
 def extract_duration_like(text):
     if not text:
         return ''
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for idx, line in enumerate(lines):
-        if re.search(r'expires\s+in|expire\s+dans|剩余|还有', line, re.I) and idx + 1 < len(lines):
+        if re.search(r'expires\s+in|expire\s+dans|expire\s+le|剩余|还有', line, re.I) and idx + 1 < len(lines):
             candidate = lines[idx + 1]
             if extract_date_like(candidate) or re.search(r'\d', candidate):
                 return re.sub(
-                    r'^(?:expires\s*in|expire\s*dans|剩余|还有)\s*[:：]?\s*',
+                    r'^(?:expires\s*in|expire\s*dans|expire\s*le|剩余|还有)\s*[:：]?\s*',
                     '', candidate, flags=re.I
                 ).strip()
 
-    # 法语: 4j 14h / 3 jours 2 heures；英语: 5 days 4 hours；中文: 4天14小时
     match = re.search(
         r'(\d+\s*(?:jours?|j|heures?|h|days?|d|hours?|天|日|小时)\b)'
         r'(?:\s*\d+\s*(?:jours?|j|heures?|h|days?|d|hours?|天|日|小时)\b)?',
@@ -367,14 +402,18 @@ def get_project_name(card, idx):
         line = line.strip()
         if line and len(line) <= 80 \
                 and not extract_duration_like(line) \
-                and not re.search(r'renew|renouvel|réactiv|reactivat|suspended|suspendu|expiry|expire|expire dans|expires in|valid|manage|gérer|gerer|续期|重新激活|恢复|暂停|过期|到期', line, re.I):
+                and not re.search(
+                    r'renew|renouvel|réactiv|reactivat|suspended|suspendu|expiry|expire|'
+                    r'expire dans|expires in|valid|manage|gérer|gerer|'
+                    r'续期|重新激活|恢复|暂停|过期|到期|管理',
+                    line, re.I
+                ):
             return line
     return f"项目 #{idx}"
 
 
-# ★ 重写：先按 "Expire dans" / "Expires in" 精确匹配标签，取紧邻兄弟节点
+# ★ 重写：先按 "Expire dans" 精确匹配标签，取紧邻兄弟节点
 def get_project_expiry(card):
-    # 精确匹配标签文本，取紧随其后的兄弟节点
     for label in EXPIRE_LABELS:
         try:
             labels = card.find_elements(
@@ -392,7 +431,7 @@ def get_project_expiry(card):
         except Exception:
             continue
 
-    # 兜底：原有选择器 + 法语/英语 XPath
+    # 兜底
     selectors = [
         '.projects-expiry-value',
         '.projects-service-cell--expiry strong',
@@ -424,6 +463,41 @@ def get_project_expiry(card):
     return extract_date_like(card_text) or extract_duration_like(card_text) or '未知'
 
 
+# ★ 新增：在任意页面（通常是 Manage 详情页）读取过期时间
+def read_expiry_from_page(sb):
+    # 1) 优先按 "Expire dans" / "Expires in" 标签精确匹配 → 取紧邻兄弟
+    for label in EXPIRE_LABELS:
+        try:
+            labels = sb.driver.find_elements(
+                By.XPATH,
+                f'//*[normalize-space(.) = "{label}"]',
+            )
+            for lab in labels:
+                try:
+                    value_elem = lab.find_element(By.XPATH, './following-sibling::*[1]')
+                except Exception:
+                    continue
+                text = element_text(value_elem)
+                if text and len(text) <= 60:
+                    return text
+        except Exception:
+            continue
+
+    # 2) 兜底：全页扫描
+    try:
+        body_text = sb.driver.find_element(By.TAG_NAME, 'body').text
+        dur = extract_duration_like(body_text)
+        if dur:
+            return dur
+        date = extract_date_like(body_text)
+        if date:
+            return date
+    except Exception:
+        pass
+
+    return '未知'
+
+
 def get_renewal_available_note(card):
     text = element_text(card)
     patterns = [
@@ -450,12 +524,11 @@ def wait_for_renew_result(sb, idx, timeout=30):
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            # ★ 多语言成功弹窗：successfully / avec succès / réussi / succès
             for kw in SUCCESS_KEYWORDS:
                 success_modals = sb.driver.find_elements(
                     By.XPATH,
                     f'//div[contains(@class, "modal") and '
-                    f'contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "{kw.lower()}")]',
+                    f'contains(translate(., "{_UPPER}", "{_LOWER}"), "{kw.lower()}")]',
                 )
                 if any(modal.is_displayed() for modal in success_modals):
                     card = get_card_by_index(sb, idx)
@@ -506,7 +579,6 @@ def get_action_button_label(button):
         if value:
             text = f"{text} {value}"
     lowered = text.lower()
-    # ★ 支持法语 réactiver / reactiver
     if any(kw in lowered for kw in ('reactivate', 'réactiver', 'reactiver')) \
             or '重新激活' in text or '恢复' in text:
         return 'Reactivate'
@@ -542,7 +614,6 @@ def has_renew_antibot_modal(sb):
 
 
 def click_captcha_checkbox(sb, label='验证码', timeout=10):
-    """点击 ACLClouds 页面上的人机验证复选框，并处理图形验证码挑战。"""
     selectors = [
         'div.auth-captcha-inner[role="checkbox"]',
         '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
@@ -589,7 +660,6 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10):
 
 
 def handle_captcha_challenge(sb, label='验证码', timeout=20):
-    """处理图形验证码挑战：先等待挑战加载，再尝试点击对应图像。"""
     start_time = time.time()
     challenge = None
     last_error = None
@@ -762,7 +832,6 @@ def mask_email(email):
     return f"{masked_local}@{domain}"
 
 
-# ★ 消息里补上项目名和旧过期时间，排查更方便
 def build_success_message(project_name, old_expiry, new_expiry):
     masked_email = mask_email(EMAIL)
     lines = [
@@ -810,7 +879,6 @@ def build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note)
 
 
 def handle_renew_antibot(sb, project_name):
-    """Renew 后如果弹出 Anti-bot confirmation，则点击确认。"""
     modal_selectors = [
         '//div[contains(., "Anti-bot confirmation")]',
         '//div[contains(., "Confirm you are human")]',
@@ -872,7 +940,6 @@ def fill_input(sb, selector, value, label, timeout=15):
 
 
 def login(sb, email, password):
-    """执行登录，返回是否成功"""
     print("开始登录流程...")
 
     if not fill_input(sb, '#username', email, '邮箱'):
@@ -939,7 +1006,6 @@ def login(sb, email, password):
 def get_current_ip(proxy_server: str = "") -> str:
     proxies = None
     if proxy_server:
-        # ★ requests 不支持 socks://，规范化为 socks5h://
         normalized = proxy_server.replace("socks://", "socks5h://")
         proxies = {"http": normalized, "https": normalized}
     response = requests.get("https://api.ip.sb/ip", proxies=proxies, timeout=15)
@@ -950,11 +1016,9 @@ def get_current_ip(proxy_server: str = "") -> str:
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     PROXY_SERVER = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or "socks5://127.0.0.1:1080"
-    # ★ 规范化为 socks5h://
     if PROXY_SERVER.startswith("socks://"):
         PROXY_SERVER = PROXY_SERVER.replace("socks://", "socks5h://", 1)
 
-    # ★ headless 由环境变量控制（CI 里设 HEADLESS=true）
     HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
 
     sb_options = {'uc': True, 'headless': HEADLESS}
@@ -1008,31 +1072,85 @@ def main():
             return
 
         print(f"找到 {len(cards)} 个项目卡片。")
+
+        # ---- 阶段 1：收集每张卡片信息 ----
+        cards_info = []
         for idx, card in enumerate(cards, 1):
             try:
-                project_name = get_project_name(card, idx)
+                name = get_project_name(card, idx)
+                has_renew = bool(find_renew_buttons(card))
+                cards_info.append({
+                    'idx': idx,
+                    'name': name,
+                    'has_renew': has_renew,
+                })
+                print(f"  [{idx}] {name}  续期按钮={'有' if has_renew else '无'}")
+            except Exception as e:
+                print(f"收集卡片 {idx} 信息出错: {e}")
+
+        # ---- 阶段 2：处理有续期按钮的卡片 ----
+        for info in cards_info:
+            if not info['has_renew']:
+                continue
+            try:
+                cards = find_project_cards(sb)
+                if info['idx'] - 1 >= len(cards):
+                    continue
+                card = cards[info['idx'] - 1]
+                project_name = info['name']
                 old_expiry = get_project_expiry(card)
-                print(f"[{project_name}] 当前过期: {old_expiry}")
 
                 renew_btn = find_renew_buttons(card)
+                if not renew_btn:
+                    continue
 
-                if renew_btn:
-                    action_label = get_action_button_label(renew_btn[0])
-                    safe_click_element(sb, renew_btn[0], f"[{project_name}] {action_label}按钮")
-                    print(f"[{project_name}] 点击 {action_label}...")
-                    handle_renew_antibot(sb, project_name)
-                    success, new_expiry, result_note = wait_for_renew_result(sb, idx, timeout=30)
-                    if success:
-                        print(f"续期成功！状态: {result_note}，新过期: {new_expiry}")
-                        send_telegram(build_success_message(project_name, old_expiry, new_expiry))
-                    else:
-                        send_telegram(build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note))
+                action_label = get_action_button_label(renew_btn[0])
+                safe_click_element(sb, renew_btn[0], f"[{project_name}] {action_label}按钮")
+                print(f"[{project_name}] 点击 {action_label}...")
+                handle_renew_antibot(sb, project_name)
+                success, new_expiry, result_note = wait_for_renew_result(sb, info['idx'], timeout=30)
+                if success:
+                    print(f"续期成功！状态: {result_note}，新过期: {new_expiry}")
+                    send_telegram(build_success_message(project_name, old_expiry, new_expiry))
                 else:
-                    note = get_renew_note(card)
-                    print(f"无 Renew 按钮，提示: {note}")
-                    send_telegram(build_not_yet_due_message(project_name, old_expiry))
+                    send_telegram(build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note))
             except Exception as e:
-                print(f"处理卡片 {idx} 出错: {e}")
+                print(f"处理续期卡片 {info['idx']} 出错: {e}")
+                send_telegram(f"🇫🇷 Aclclouds 续期通知\n\n⚠️ 处理出错: {str(e)}")
+
+        # ---- 阶段 3：处理无续期按钮的卡片 → 点 Manage 读详情页 ----
+        for info in cards_info:
+            if info['has_renew']:
+                continue
+            project_name = info['name']
+            try:
+                cards = find_project_cards(sb)
+                if info['idx'] - 1 >= len(cards):
+                    continue
+                card = cards[info['idx'] - 1]
+
+                manage_btn = find_manage_buttons(card)
+                if not manage_btn:
+                    print(f"[{project_name}] 无 Manage 按钮，过期时间未知")
+                    send_telegram(build_not_yet_due_message(project_name, '未知'))
+                    continue
+
+                print(f"[{project_name}] 进入 Manage 详情页读取过期时间...")
+                safe_click_element(sb, manage_btn[0], f"[{project_name}] Manage")
+                sb.wait_for_ready_state_complete()
+                sb.sleep(3)
+
+                old_expiry = read_expiry_from_page(sb)
+                print(f"[{project_name}] 详情页过期: {old_expiry}")
+
+                send_telegram(build_not_yet_due_message(project_name, old_expiry))
+
+                # 返回列表页
+                sb.open(PROJECTS_URL)
+                sb.wait_for_ready_state_complete()
+                sb.sleep(2)
+            except Exception as e:
+                print(f"处理卡片 {project_name} 出错: {e}")
                 send_telegram(f"🇫🇷 Aclclouds 续期通知\n\n⚠️ 处理出错: {str(e)}")
 
         print("所有项目处理完成。")
