@@ -64,9 +64,10 @@ def is_login_page(sb):
     return LOGIN_PATH in sb.get_current_url()
 
 
+# ★ 收紧：只有 dash 子域下的 /dashboard 才算已登录
 def is_logged_in(sb):
-    current_url = sb.get_current_url()
-    return BASE_URL in current_url and LOGIN_PATH not in current_url
+    url = sb.get_current_url()
+    return 'dash.aclclouds.com' in url and '/dashboard' in url
 
 
 def scroll_to_selector(sb, selector):
@@ -184,7 +185,7 @@ def find_elements(root, selector):
     return root.find_elements(by, selector)
 
 
-# ★ 新增：Manage / Gérer 按钮
+# ★ Manage / Gérer 按钮
 def find_manage_buttons(root):
     selectors = [
         f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "manage")]',
@@ -240,7 +241,7 @@ def find_renew_buttons(root):
     return unique_elements([button for button in buttons if element_text(button) or button.is_displayed()])
 
 
-# ★ 重写：从子节点向上爬，找到真正的卡片容器；找不到返回 None，绝不返回 body/main
+# ★ 从子节点向上爬，找到真正的卡片容器；找不到返回 None，绝不返回 body/main
 def find_card_container_from_child(sb, child):
     return sb.driver.execute_script(
         '''
@@ -283,7 +284,7 @@ def find_card_container_from_child(sb, child):
     )
 
 
-# ★ 重写：锚点 = Manage 按钮 > 续期按钮 > 过期标签
+# ★ 锚点 = Manage 按钮 > 续期按钮 > 过期标签
 def find_project_cards(sb):
     cards = []
 
@@ -412,7 +413,7 @@ def get_project_name(card, idx):
     return f"项目 #{idx}"
 
 
-# ★ 重写：先按 "Expire dans" 精确匹配标签，取紧邻兄弟节点
+# ★ 先按 "Expire dans" 精确匹配标签，取紧邻兄弟节点
 def get_project_expiry(card):
     for label in EXPIRE_LABELS:
         try:
@@ -463,7 +464,7 @@ def get_project_expiry(card):
     return extract_date_like(card_text) or extract_duration_like(card_text) or '未知'
 
 
-# ★ 新增：在任意页面（通常是 Manage 详情页）读取过期时间
+# ★ 在任意页面（通常是 Manage 详情页）读取过期时间
 def read_expiry_from_page(sb):
     # 1) 优先按 "Expire dans" / "Expires in" 标签精确匹配 → 取紧邻兄弟
     for label in EXPIRE_LABELS:
@@ -983,11 +984,12 @@ def login(sb, email, password):
             return false;
         ''')
 
+    # ★ 去掉严格的 assert_title，改为宽松判断
     try:
         wait_for_url_change(sb, login_page_url, timeout=30)
-        if '/auth/login' not in sb.get_current_url():
-            sb.assert_title('Home | ACLClouds')
-            print("✅ 登录成功！")
+        current = sb.get_current_url()
+        if '/auth/login' not in current and 'dash.aclclouds.com' in current:
+            print(f"✅ 登录成功！URL: {current}，标题: {sb.get_title()}")
             return True
         else:
             error_msg = ""
@@ -996,7 +998,7 @@ def login(sb, email, password):
                 error_msg = errors[0].text.strip() if errors else ''
             except Exception:
                 pass
-            print(f"❌ 登录失败，错误: {error_msg}")
+            print(f"❌ 登录失败，当前: {current}，错误: {error_msg}")
             return False
     except Exception as e:
         print(f"登录过程异常: {e}")
@@ -1037,30 +1039,42 @@ def main():
 
         sb.set_window_size(1366, 768)
 
-        if not is_login_page(sb):
-            sb.open(BASE_URL)
+        # ★ 先打开项目页判断是否已登录；未登录再跳登录页
+        print(f"打开项目页: {PROJECTS_URL}")
+        sb.open(PROJECTS_URL)
+        sb.wait_for_ready_state_complete()
+        time.sleep(2)
+
+        if not is_logged_in(sb):
+            print(f"未登录（当前: {sb.get_current_url()}），前往登录页...")
+            sb.open(f"{BASE_URL}{LOGIN_PATH}")
             sb.wait_for_ready_state_complete()
             time.sleep(2)
 
-        if is_login_page(sb):
-            print("执行正常登录...")
+            if not is_login_page(sb):
+                print(f"❌ 无法打开登录页，当前 URL: {sb.get_current_url()}")
+                log_projects_page_diagnostics(sb)
+                send_telegram(f"⚠️ 无法打开登录页，当前 URL: {sb.get_current_url()}")
+                return
+
             if not EMAIL or not PASSWORD:
                 print("❌ 未配置 EMAIL 或 PASSWORD，无法执行账号密码登录。")
                 send_telegram("⚠️ 未配置 EMAIL 或 PASSWORD。")
                 return
+
             if not login(sb, EMAIL, PASSWORD):
                 return
-        elif is_logged_in(sb):
-            print(f"✅ 当前已登录。URL: {sb.get_current_url()}，标题: {sb.get_title()}")
-        else:
-            print(f"❌ 未能确认登录状态。URL: {sb.get_current_url()}，标题: {sb.get_title()}")
-            send_telegram("⚠️ 未能确认登录状态，请检查账号密码配置。")
-            return
 
-        # 2. 进入项目页
-        sb.open(PROJECTS_URL)
-        sb.wait_for_ready_state_complete()
-        time.sleep(3)
+            sb.open(PROJECTS_URL)
+            sb.wait_for_ready_state_complete()
+            time.sleep(3)
+        else:
+            print(f"✅ 当前已登录: {sb.get_current_url()}")
+
+        if '/dashboard/projects' not in sb.get_current_url():
+            sb.open(PROJECTS_URL)
+            sb.wait_for_ready_state_complete()
+            time.sleep(3)
 
         # 3. 定位卡片
         cards = find_project_cards(sb)
