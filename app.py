@@ -18,14 +18,14 @@ TG_CHAT_ID = os.getenv('TG_CHAT_ID') or ""
 TG_BOT_TOKEN = os.getenv('TG_BOT_TOKEN') or ""
 
 LOGIN_PATH = '/auth/login'
-BASE_URL = 'https://dash.aclclouds.com'
+# ★ 面板实际在主域名下，不是 dash 子域
+BASE_URL = 'https://aclclouds.com'
 PROJECTS_URL = f'{BASE_URL}/dashboard/projects'
 
-# ★ 多语言关键词
+# 多语言关键词
 EXPIRE_LABELS = ('Expire dans', 'Expires in', 'Expire le', 'Expires on', '到期', '过期')
 SUCCESS_KEYWORDS = ('successfully', 'avec succès', 'réussi', 'succès', '成功')
 
-# XPath 大小写归一化用的字符映射
 _UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ"
 _LOWER = "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"
 
@@ -64,10 +64,10 @@ def is_login_page(sb):
     return LOGIN_PATH in sb.get_current_url()
 
 
-# ★ 收紧：只有 dash 子域下的 /dashboard 才算已登录
+# ★ 修复：不再硬编码 dash.aclclouds.com，改用 /dashboard 路径判断
 def is_logged_in(sb):
     url = sb.get_current_url()
-    return 'dash.aclclouds.com' in url and '/dashboard' in url
+    return '/dashboard' in url and '/auth/login' not in url
 
 
 def scroll_to_selector(sb, selector):
@@ -117,7 +117,6 @@ def unique_elements(elements):
     return unique
 
 
-# ★ 修复：原实现用 list.count()，永远返回 False，导致父子卡片去重完全失效
 def element_contains(parent, child):
     if parent == child:
         return True
@@ -185,7 +184,6 @@ def find_elements(root, selector):
     return root.find_elements(by, selector)
 
 
-# ★ Manage / Gérer 按钮
 def find_manage_buttons(root):
     selectors = [
         f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "manage")]',
@@ -209,24 +207,20 @@ def find_manage_buttons(root):
 def find_renew_buttons(root):
     selectors = [
         '.projects-renew-btn',
-        # Renew / Renouveler
         f'.//button['
         f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "renew") or '
         f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "renouvel") or '
         f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "renew") or '
         f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "renouvel")]',
-        # Reactivate / Réactiver
         f'.//button['
         f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "reactivate") or '
         f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "réactiv") or '
         f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "reactivate") or '
         f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "réactiv")]',
-        # 文本匹配
         f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renew")]',
         f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renouvel")]',
         f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "reactivate")]',
         f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "réactiv")]',
-        # 通用 role=button / a
         f'.//*[(@role="button" or self::a) and contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renew")]',
         f'.//*[(@role="button" or self::a) and contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renouvel")]',
         f'.//*[(@role="button" or self::a) and contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "reactivate")]',
@@ -241,7 +235,6 @@ def find_renew_buttons(root):
     return unique_elements([button for button in buttons if element_text(button) or button.is_displayed()])
 
 
-# ★ 从子节点向上爬，找到真正的卡片容器；找不到返回 None，绝不返回 body/main
 def find_card_container_from_child(sb, child):
     return sb.driver.execute_script(
         '''
@@ -267,12 +260,10 @@ def find_card_container_from_child(sb, child):
             const actionCount = (text.match(actionRe) || []).length;
             if (actionCount > 1) break;
 
-            // 理想卡片：既有 expire 标签又有 action
             if (hasExpire(text) && actionCount === 1 && text.length >= 20) {
                 return node;
             }
 
-            // 次选：只有一个 action + 文本长度合理（形如 "项目名\\nManage"）
             if (actionCount === 1 && text.length >= 15 && text.length <= 300) {
                 best = node;
             }
@@ -284,11 +275,9 @@ def find_card_container_from_child(sb, child):
     )
 
 
-# ★ 锚点 = Manage 按钮 > 续期按钮 > 过期标签
 def find_project_cards(sb):
     cards = []
 
-    # 方法 1：以 Manage / Gérer 按钮为锚点（列表页每张卡片必有）
     try:
         manage_btns = find_manage_buttons(sb.driver)
     except Exception:
@@ -302,7 +291,6 @@ def find_project_cards(sb):
         except Exception:
             continue
 
-    # 方法 2：以续期 / 重新激活按钮为锚点
     if not cards:
         try:
             for button in find_renew_buttons(sb.driver):
@@ -315,7 +303,6 @@ def find_project_cards(sb):
         except Exception:
             pass
 
-    # 方法 3：以过期标签为锚点（若卡片直接展示过期时间）
     if not cards:
         anchor_xpath = (
             '//*[self::div or self::span or self::p or self::label or self::small or self::strong or self::td]'
@@ -355,7 +342,6 @@ def extract_date_like(text):
     return ''
 
 
-# ★ 支持法语 "4j 14h" / "3 jours 2 heures" / 英语 / 中文
 def extract_duration_like(text):
     if not text:
         return ''
@@ -413,7 +399,6 @@ def get_project_name(card, idx):
     return f"项目 #{idx}"
 
 
-# ★ 先按 "Expire dans" 精确匹配标签，取紧邻兄弟节点
 def get_project_expiry(card):
     for label in EXPIRE_LABELS:
         try:
@@ -432,7 +417,6 @@ def get_project_expiry(card):
         except Exception:
             continue
 
-    # 兜底
     selectors = [
         '.projects-expiry-value',
         '.projects-service-cell--expiry strong',
@@ -464,9 +448,7 @@ def get_project_expiry(card):
     return extract_date_like(card_text) or extract_duration_like(card_text) or '未知'
 
 
-# ★ 在任意页面（通常是 Manage 详情页）读取过期时间
 def read_expiry_from_page(sb):
-    # 1) 优先按 "Expire dans" / "Expires in" 标签精确匹配 → 取紧邻兄弟
     for label in EXPIRE_LABELS:
         try:
             labels = sb.driver.find_elements(
@@ -484,7 +466,6 @@ def read_expiry_from_page(sb):
         except Exception:
             continue
 
-    # 2) 兜底：全页扫描
     try:
         body_text = sb.driver.find_element(By.TAG_NAME, 'body').text
         dur = extract_duration_like(body_text)
@@ -984,11 +965,11 @@ def login(sb, email, password):
             return false;
         ''')
 
-    # ★ 去掉严格的 assert_title，改为宽松判断
+    # ★ 不再依赖 dash 子域，改用 /dashboard 路径判断
     try:
         wait_for_url_change(sb, login_page_url, timeout=30)
         current = sb.get_current_url()
-        if '/auth/login' not in current and 'dash.aclclouds.com' in current:
+        if '/auth/login' not in current and '/dashboard' in current:
             print(f"✅ 登录成功！URL: {current}，标题: {sb.get_title()}")
             return True
         else:
@@ -1039,7 +1020,6 @@ def main():
 
         sb.set_window_size(1366, 768)
 
-        # ★ 先打开项目页判断是否已登录；未登录再跳登录页
         print(f"打开项目页: {PROJECTS_URL}")
         sb.open(PROJECTS_URL)
         sb.wait_for_ready_state_complete()
@@ -1076,7 +1056,6 @@ def main():
             sb.wait_for_ready_state_complete()
             time.sleep(3)
 
-        # 3. 定位卡片
         cards = find_project_cards(sb)
 
         if not cards:
@@ -1087,7 +1066,6 @@ def main():
 
         print(f"找到 {len(cards)} 个项目卡片。")
 
-        # ---- 阶段 1：收集每张卡片信息 ----
         cards_info = []
         for idx, card in enumerate(cards, 1):
             try:
@@ -1102,7 +1080,6 @@ def main():
             except Exception as e:
                 print(f"收集卡片 {idx} 信息出错: {e}")
 
-        # ---- 阶段 2：处理有续期按钮的卡片 ----
         for info in cards_info:
             if not info['has_renew']:
                 continue
@@ -1132,7 +1109,6 @@ def main():
                 print(f"处理续期卡片 {info['idx']} 出错: {e}")
                 send_telegram(f"🇫🇷 Aclclouds 续期通知\n\n⚠️ 处理出错: {str(e)}")
 
-        # ---- 阶段 3：处理无续期按钮的卡片 → 点 Manage 读详情页 ----
         for info in cards_info:
             if info['has_renew']:
                 continue
@@ -1159,7 +1135,6 @@ def main():
 
                 send_telegram(build_not_yet_due_message(project_name, old_expiry))
 
-                # 返回列表页
                 sb.open(PROJECTS_URL)
                 sb.wait_for_ready_state_complete()
                 sb.sleep(2)
