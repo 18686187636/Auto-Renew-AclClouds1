@@ -149,7 +149,6 @@ def wait_for_spa_ready(sb, timeout=20):
     start = time.time()
     while time.time() - start < timeout:
         try:
-            # 只要出现任意一个带有 Details aria-label 的按钮，就说明卡片渲染好了
             btns = sb.driver.find_elements(
                 By.XPATH, '//*[starts-with(@aria-label, "Details : ")]'
             )
@@ -158,7 +157,6 @@ def wait_for_spa_ready(sb, timeout=20):
         except Exception:
             pass
         try:
-            # 或者出现任何含 "Expire dans / Expires in" 的文本
             labels = sb.driver.find_elements(
                 By.XPATH,
                 '//*[normalize-space(.) = "Expire dans" '
@@ -196,12 +194,15 @@ def get_project_name_from_details(card):
         r'^Détails\s*[:：]\s*(.+)$',
         r'^详情\s*[:：]\s*(.+)$',
     )
+
+    buttons = []
     try:
         buttons = card.find_elements(
-            By.XPATH, './/*[@aria-label and starts-with(@aria-label, "Details")]
+            By.XPATH, './/*[starts-with(@aria-label, "Details")]'
         )
     except Exception:
         buttons = []
+
     if not buttons:
         try:
             buttons = card.find_elements(By.CSS_SELECTOR, 'button[aria-label]')
@@ -234,7 +235,6 @@ def looks_like_project_card(card):
         return False
     if len(stripped) > 2000:
         return False
-    # 必须能找到 Details 按钮
     try:
         if card.find_elements(
             By.XPATH, './/*[starts-with(@aria-label, "Details")]'
@@ -242,14 +242,12 @@ def looks_like_project_card(card):
             return True
     except Exception:
         pass
-    # 或者能找到 Expire 标签
     try:
         for label in EXPIRE_LABELS:
             if card.find_elements(By.XPATH, f'.//*[normalize-space(.) = "{label}"]'):
                 return True
     except Exception:
         pass
-    # 或者找到续期按钮
     try:
         if find_renew_buttons(card):
             return True
@@ -398,7 +396,6 @@ def find_card_container_from_child(sb, child):
             const actionCount = (text.match(actionRe) || []).length;
             if (actionCount > 1) break;
 
-            // ★ 优先返回带 aria-label="Details : ..." 的容器
             if (node.querySelector && node.querySelector('[aria-label^="Details"]')) {
                 if (hasExpire(text) || actionCount === 1) {
                     return node;
@@ -423,7 +420,6 @@ def find_card_container_from_child(sb, child):
 def find_project_cards(sb):
     cards = []
 
-    # ★ 优先用 Details 按钮来定位卡片
     try:
         details_btns = find_details_buttons(sb.driver)
     except Exception:
@@ -436,7 +432,6 @@ def find_project_cards(sb):
         except Exception:
             continue
 
-    # 退回到 Manage 按钮
     if not cards:
         try:
             manage_btns = find_manage_buttons(sb.driver)
@@ -450,7 +445,6 @@ def find_project_cards(sb):
             except Exception:
                 continue
 
-    # 再退到续期按钮
     if not cards:
         try:
             for button in find_renew_buttons(sb.driver):
@@ -463,7 +457,6 @@ def find_project_cards(sb):
         except Exception:
             pass
 
-    # 最后退到 Expire 标签
     if not cards:
         anchor_xpath = (
             '//*[self::div or self::span or self::p or self::label or self::small or self::strong or self::td]'
@@ -531,12 +524,10 @@ def extract_duration_like(text):
 
 
 def get_project_name(card, idx):
-    # ★ 首选：从 aria-label="Details : Mon VPS" 提取
     name = get_project_name_from_details(card)
     if name:
         return name
 
-    # 次选：h3 / h4 短标题
     for tag in ('h3', 'h4', 'h2', 'h1'):
         try:
             for elem in card.find_elements(By.TAG_NAME, tag):
@@ -549,7 +540,6 @@ def get_project_name(card, idx):
         except Exception:
             continue
 
-    # 再次：class 里带 title / name
     for selector in ('[class*="title"]', '[class*="name"]'):
         try:
             for elem in card.find_elements(By.CSS_SELECTOR, selector):
@@ -562,7 +552,6 @@ def get_project_name(card, idx):
         except Exception:
             continue
 
-    # 最后：逐行扫描
     for line in element_text(card).splitlines():
         line = line.strip()
         if line and len(line) <= 80 \
@@ -1233,7 +1222,6 @@ def main():
             sb.wait_for_ready_state_complete()
             time.sleep(3)
 
-        # ★ 等待 SPA 把卡片渲染出来
         print("等待项目列表渲染...")
         wait_for_spa_ready(sb, timeout=20)
         sb.sleep(1)
@@ -1305,7 +1293,6 @@ def main():
                     continue
                 card = cards[info['idx'] - 1]
 
-                # ★ 优先 Details，其次 Manage
                 action_btn = find_details_buttons(card) or find_manage_buttons(card)
                 if not action_btn:
                     print(f"[{project_name}] 无 Details / Manage 按钮，尝试从卡片文本读过期时间")
@@ -1320,7 +1307,6 @@ def main():
                 sb.wait_for_ready_state_complete()
                 sb.sleep(3)
 
-                # 先尝试在展开区里读
                 old_expiry = '未知'
                 try:
                     cards_now = find_project_cards(sb)
