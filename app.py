@@ -11,7 +11,7 @@ from selenium.common.exceptions import ElementClickInterceptedException, WebDriv
 from selenium.webdriver.common.by import By
 from zoneinfo import ZoneInfo
 
-# ----- 配置 -----
+# ----- 配置（从环境变量读取或在双引号内填写） -----
 EMAIL = os.getenv('EMAIL') or ""
 PASSWORD = os.getenv('PASSWORD') or ""
 TG_CHAT_ID = os.getenv('TG_CHAT_ID') or ""
@@ -270,65 +270,24 @@ def find_card_container_from_child(sb, child):
     )
 
 
-# ==================== 修改点 1：find_project_cards ====================
+# ==================== 修改点：find_project_cards ====================
 
 def find_project_cards(sb):
     cards = []
 
-    # ★★★ 优先：卡片视图（基于 "Nom personnalisé"） ★★★
-    try:
-        card_els = sb.driver.execute_script('''
-            const result = [];
-            const seen = new Set();
-
-            const nameSpans = [];
-            document.querySelectorAll('span').forEach(s => {
-                const t = (s.textContent || '');
-                if (/Nom personnalisé|Custom name|自定义名称/i.test(t) && t.length < 300) {
-                    nameSpans.push(s);
-                }
-            });
-
-            for (const s of nameSpans) {
-                let cur = s.parentElement;
-                let cardEl = null;
-                for (let i = 0; i < 20 && cur; i++, cur = cur.parentElement) {
-                    const tt = cur.innerText || '';
-                    if (tt.length > 2000) break;
-                    const cnt = (tt.match(/Nom personnalisé/g) || []).length;
-                    if (cnt > 1) break;
-                    if (/Expire dans|Expires in|Expire le|Expires on/i.test(tt)) {
-                        cardEl = cur;
-                    }
-                }
-                if (!cardEl) continue;
-                const sig = (cardEl.innerText || '').slice(0, 300);
-                if (seen.has(sig)) continue;
-                seen.add(sig);
-                result.push(cardEl);
-            }
-            return result;
-        ''')
-        if card_els:
-            print(f"✅ 卡片视图解析到 {len(card_els)} 个项目")
-            for ce in card_els:
-                cards.append(ce)
-    except Exception as e:
-        print(f"卡片视图解析失败: {e}")
-
     # ===== 原有逻辑：Manage 按钮 =====
-    if not cards:
+    try:
+        manage_btns = find_manage_buttons(sb.driver)
+    except Exception:
+        manage_btns = []
+
+    for btn in manage_btns:
         try:
-            manage_btns = find_manage_buttons(sb.driver)
+            card = find_card_container_from_child(sb, btn)
+            if card is not None:
+                cards.append(card)
         except Exception:
-            manage_btns = []
-        for btn in manage_btns:
-            try:
-                card = find_card_container_from_child(sb, btn)
-                if card is not None:
-                    cards.append(card)
-            except Exception:
-                continue
+            continue
 
     # ===== 原有逻辑：续期按钮 =====
     if not cards:
@@ -366,7 +325,7 @@ def find_project_cards(sb):
             except Exception:
                 continue
 
-    # ===== 兜底：div-based 表格行 =====
+    # ===== 兜底：div 表格行 + 点击 Actif 展开读名字 =====
     if not cards:
         try:
             rows = sb.driver.execute_script('''
@@ -378,7 +337,6 @@ def find_project_cards(sb):
                         if (UUID_RE.test(t)) leaves.push(el);
                     }
                 });
-
                 const seen = new Set();
                 const rows = [];
                 for (const n of leaves) {
@@ -403,18 +361,181 @@ def find_project_cards(sb):
                 }
                 return rows;
             ''')
-            for row in rows:
-                cards.append(row)
         except Exception as e:
             print(f"表格行回退解析失败: {e}")
+            rows = []
+
+        if rows:
+            print(f"表格回退：找到 {len(rows)} 行，尝试点击 Actif 展开...")
+
+        for row in rows:
+            # ===== 1) 优先找行内 "Actif"/"Active" 标签来点击展开 =====
+            status_els = []
+            try:
+                status_els = row.find_elements(
+                    By.XPATH,
+                    './/*[self::span or self::button or self::div or self::a]'
+                    '[normalize-space(.) = "Actif" '
+                    'or normalize-space(.) = "Active" '
+                    'or normalize-space(.) = "Activé" '
+                    'or normalize-space(.) = "Activated" '
+                    'or normalize-space(.) = "活跃" '
+                    'or normalize-space(.) = "正常"]'
+                )
+            except Exception:
+                status_els = []
+
+            chosen = None
+            for el in status_els:
+                try:
+                    if el.is_displayed() and el.is_enabled():
+                        chosen = el
+                        break
+                except Exception:
+                    continue
+
+            if chosen is not None:
+                try:
+                    safe_click_element(sb, chosen, "Actif 展开")
+                    print("  ✅ 已点击 Actif 展开")
+                    sb.sleep(1.5)
+                except Exception as e:
+                    print(f"  点击 Actif 失败: {e}")
+            else:
+                # 回退到 Details 按钮
+                btns = []
+                try:
+                    btns = row.find_elements(
+                        By.XPATH,
+                        './/*[@aria-controls and starts-with(@aria-controls, "service-details-")] | '
+                        './/button[contains(@aria-label, "Details")] | '
+                        './/*[starts-with(@aria-label, "Details : ")]'
+                    )
+                except Exception:
+                    btns = []
+                if btns:
+                    try:
+                        safe_click_element(sb, btns[0], "Details 展开")
+                        print("  ✅ 已点击 Details 展开")
+                        sb.sleep(1.5)
+                    except Exception as e:
+                        print(f"  点击 Details 失败: {e}")
+
+            # ===== 2) 全局读 "Nom personnalisé : Mon VPS" =====
+            name = ''
+            try:
+                name = sb.driver.execute_script('''
+                    const names = [];
+                    document.querySelectorAll('span').forEach(s => {
+                        const t = (s.textContent || '');
+                        if (!/personnalis|Custom name|自定义名称/i.test(t)) return;
+                        if (t.length > 300) return;
+                        const strong = s.querySelector('strong');
+                        if (strong) {
+                            const v = strong.textContent.trim();
+                            if (v && v.length <= 80 && !names.includes(v)) names.push(v);
+                        }
+                    });
+                    return names.length ? names[0] : '';
+                ''') or ''
+            except Exception as e:
+                print(f"  读取 Nom personnalisé 失败: {e}")
+
+            # ===== 3) 写到 data-acl-project-name =====
+            if name:
+                print(f"  ✅ 读到项目名: {name}")
+                try:
+                    row.set_attribute('data-acl-project-name', name)
+                except Exception:
+                    pass
+            else:
+                print("  ⚠️ 未能读到项目名")
+
+            cards.append(row)
+
+    # ===== 兜底诊断 =====
+    if not cards:
+        try:
+            mon_dump = sb.driver.execute_script('''
+                const hits = [];
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+                let tn;
+                while (tn = walker.nextNode()) {
+                    const s = (tn.textContent || '').trim();
+                    if (s.includes('Mon VPS') || s.includes('Nom personnalisé')) {
+                        let p = tn.parentElement;
+                        if (p) {
+                            const h = (p.outerHTML || '').slice(0, 1500);
+                            if (!hits.includes(h)) hits.push(h);
+                        }
+                    }
+                }
+                return hits.slice(0, 5);
+            ''')
+            if mon_dump:
+                print("=" * 60)
+                print("🔍 找到含 'Mon VPS' / 'Nom personnalisé' 的元素：")
+                for i, h in enumerate(mon_dump, 1):
+                    print(f"---- 元素 #{i} ----")
+                    print(h)
+                print("=" * 60)
+        except Exception as e:
+            print(f"诊断失败: {e}")
 
     return dedupe_project_cards(cards)
 
 
-# ==================== 修改点 2：get_project_name ====================
+# ==================== 以下全部保持原样 ====================
+
+def extract_date_like(text):
+    if not text:
+        return ''
+    patterns = [
+        r'\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',
+        r'\d{1,2}[-/]\d{1,2}[-/]\d{4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    return ''
+
+
+def extract_duration_like(text):
+    if not text:
+        return ''
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        if re.search(r'expires\s+in|expire\s+dans|expire\s+le|剩余|还有', line, re.I) and idx + 1 < len(lines):
+            candidate = lines[idx + 1]
+            if extract_date_like(candidate) or re.search(r'\d', candidate):
+                return re.sub(
+                    r'^(?:expires\s*in|expire\s*dans|expire\s*le|剩余|还有)\s*[:：]?\s*',
+                    '', candidate, flags=re.I
+                ).strip()
+
+    match = re.search(
+        r'(\d+\s*(?:jours?|j|heures?|h|days?|d|hours?|天|日|小时)\b)'
+        r'(?:\s*\d+\s*(?:jours?|j|heures?|h|days?|d|hours?|天|日|小时)\b)?',
+        text, re.I,
+    )
+    if match:
+        return match.group(0).strip()
+
+    return ''
+
 
 def get_project_name(card, idx):
-    # ★ 优先：直接 XPath 找 "Nom personnalisé : <strong>X</strong>"
+    # 优先读 JS 侧写入的项目名
+    try:
+        name = (card.get_attribute('data-acl-project-name') or '').strip()
+        if name:
+            return name
+    except Exception:
+        pass
+
+    # ★ 兜底：直接 XPath 找 "Nom personnalisé : <strong>X</strong>"
     try:
         for strong in card.find_elements(
             By.XPATH,
@@ -459,47 +580,6 @@ def get_project_name(card, idx):
                 ):
             return line
     return f"项目 #{idx}"
-
-
-# ==================== 以下全部保持原样 ====================
-
-def extract_date_like(text):
-    if not text:
-        return ''
-    patterns = [
-        r'\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',
-        r'\d{1,2}[-/]\d{1,2}[-/]\d{4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(0)
-    return ''
-
-
-def extract_duration_like(text):
-    if not text:
-        return ''
-
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    for idx, line in enumerate(lines):
-        if re.search(r'expires\s+in|expire\s+dans|expire\s+le|剩余|还有', line, re.I) and idx + 1 < len(lines):
-            candidate = lines[idx + 1]
-            if extract_date_like(candidate) or re.search(r'\d', candidate):
-                return re.sub(
-                    r'^(?:expires\s*in|expire\s*dans|expire\s*le|剩余|还有)\s*[:：]?\s*',
-                    '', candidate, flags=re.I
-                ).strip()
-
-    match = re.search(
-        r'(\d+\s*(?:jours?|j|heures?|h|days?|d|hours?|天|日|小时)\b)'
-        r'(?:\s*\d+\s*(?:jours?|j|heures?|h|days?|d|hours?|天|日|小时)\b)?',
-        text, re.I,
-    )
-    if match:
-        return match.group(0).strip()
-
-    return ''
 
 
 def get_project_expiry(card):
@@ -1158,7 +1238,7 @@ def main():
             sb.wait_for_ready_state_complete()
             time.sleep(3)
 
-        # 等待页面渲染（等出现 "Expire dans" 或 UUID）
+        # 等待页面基本渲染
         print("等待项目列表渲染...")
         start = time.time()
         while time.time() - start < 20:
