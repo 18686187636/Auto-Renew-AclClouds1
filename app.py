@@ -35,6 +35,11 @@ UUID_RE = re.compile(
     re.I,
 )
 
+DETAILS_LABEL_RE = re.compile(
+    r'^(?:Details|Détails|详情)\s*[:：]\s*(.+)$',
+    re.I,
+)
+
 
 # ==================== 基础工具 ====================
 
@@ -51,7 +56,7 @@ def send_telegram(message):
         data = {'chat_id': TG_CHAT_ID, 'text': message}
         try:
             requests.post(url, data=data, timeout=10)
-            print(f"Telegram sent: {message[:50]}...")
+            print(f"Telegram sent:\n{message}")
         except Exception as e:
             print(f"Failed to send Telegram: {e}")
     else:
@@ -131,7 +136,7 @@ def wait_for_spa_ready(sb, timeout=20):
 # ==================== div-based 表格解析（核心） ====================
 
 def parse_project_table(sb):
-    """解析 ACLClouds 项目页的 div-based 表格。"""
+    """解析 ACLClouds 项目页的 div-based 表格，同时抓取 Details 按钮的 aria-label。"""
     js_script = '''
     const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
@@ -168,6 +173,22 @@ def parse_project_table(sb):
         if (seen.has(uuid)) continue;
         seen.add(uuid);
 
+        // 抓取行内 Details / Détails / 详情 按钮的 aria-label
+        let detailsLabel = '';
+        try {
+            const detailBtn = row.querySelector(
+                '[aria-controls^="service-details-"], ' +
+                '[aria-label^="Details"], ' +
+                '[aria-label^="Détails"], ' +
+                '[aria-label^="详情"], ' +
+                'button[title="Details"], ' +
+                'button[title="Détails"]'
+            );
+            if (detailBtn) {
+                detailsLabel = detailBtn.getAttribute('aria-label') || '';
+            }
+        } catch (e) {}
+
         const texts = [];
         const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT, null);
         let t;
@@ -175,7 +196,7 @@ def parse_project_table(sb):
             const s = (t.textContent || '').trim();
             if (s) texts.push(s);
         }
-        rows.push({ uuid: uuid, texts: texts });
+        rows.push({ uuid: uuid, texts: texts, detailsLabel: detailsLabel });
     }
     return rows;
     '''
@@ -193,6 +214,7 @@ def parse_project_table(sb):
     for raw in raw_rows:
         texts = raw.get('texts', [])
         uuid = raw.get('uuid', '').lower()
+        details_label = raw.get('detailsLabel', '') or ''
         if not texts or not uuid:
             continue
 
@@ -229,12 +251,29 @@ def parse_project_table(sb):
             'expiry': expiry or '未知',
             'renewal': renewal or '',
             'status': status or '',
+            'details_label': details_label,
         })
 
     return results
 
 
+def extract_name_from_details_label(label):
+    """从 'Details : Mon VPS' 里提取 'Mon VPS'。"""
+    if not label:
+        return ''
+    m = DETAILS_LABEL_RE.match(label.strip())
+    if m:
+        return m.group(1).strip()
+    return ''
+
+
 def get_project_name_from_item(item):
+    # ★ 首选：Details 按钮的 aria-label
+    name = extract_name_from_details_label(item.get('details_label', ''))
+    if name:
+        return name
+
+    # 回退：MODEL / TYPE
     model = (item.get('model') or '').strip()
     type_ = (item.get('type') or '').strip()
     if model and type_:
@@ -478,19 +517,16 @@ def build_success_message(project_name, old_expiry, new_expiry):
 
 
 def build_not_yet_due_message(project_name, expiry, note=''):
+    # ★ 保持最初的简洁格式，不拼接 note
     lines = [
         "🇫🇷 Aclclouds 续期通知",
         "",
         "⏳ 未到续期时间",
         f"📦 项目: {project_name}",
         f"⏱️ 当前过期时间: {expiry}",
-    ]
-    if note:
-        lines.append(f"📅 续期状态: {note}")
-    lines.extend([
         f"👤 登录账户: {mask_email(EMAIL)}",
         f"⏱️ 运行时间: {beijing_time_str()}",
-    ])
+    ]
     return "\n".join(lines)
 
 
@@ -645,7 +681,7 @@ def main():
         time.sleep(2)
 
         if not is_logged_in(sb):
-            print(f"未登录，前往登录页...")
+            print("未登录，前往登录页...")
             sb.open(f"{BASE_URL}{LOGIN_PATH}")
             sb.wait_for_ready_state_complete()
             time.sleep(2)
@@ -689,7 +725,8 @@ def main():
                 f"id={item['service_id'][:8]}  "
                 f"expiry={item['expiry']}  "
                 f"renewal={item['renewal'] or '-'}  "
-                f"status={item['status'] or '-'}"
+                f"status={item['status'] or '-'}  "
+                f"details_label='{item.get('details_label', '')}'"
             )
 
         for idx, item in enumerate(items, 1):
