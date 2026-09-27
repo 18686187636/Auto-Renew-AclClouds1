@@ -125,20 +125,263 @@ def wait_for_spa_ready(sb, timeout=20):
     return False
 
 
-# ==================== div-based 表格解析（核心） ====================
+# ==================== 验证码处理（核心修复） ====================
+
+def _get_challenge(sb, challenge_selectors):
+    for selector in challenge_selectors:
+        try:
+            if selector.startswith('/'):
+                for elem in sb.driver.find_elements(By.XPATH, selector):
+                    if elem.is_displayed():
+                        return elem
+            else:
+                elem = sb.wait_for_element_visible(selector, timeout=1)
+                if elem and elem.is_displayed():
+                    return elem
+        except Exception:
+            continue
+    return None
+
+
+def _get_captcha_target(ch):
+    """从挑战容器里提取目标文本。"""
+    # 1) prompt strong
+    for sel in ('.auth-captcha-prompt strong', '.auth-capcha-prompt strong'):
+        try:
+            t = ch.find_element(By.CSS_SELECTOR, sel).text.strip()
+            if t:
+                return t
+        except Exception:
+            pass
+    # 2) aria-label
+    try:
+        aria_label = ch.get_attribute('aria-label') or ''
+        m = re.search(r'(?:Click on|Select)\s+(.+)', aria_label, re.I)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    # 3) 整个挑战文本
+    try:
+        text = (ch.text or '').strip()
+        m = re.search(r'(?:Click on|Select)\s+["\']?([^"\'\n]+)', text, re.I)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return ''
+
+
+def _get_captcha_options(ch):
+    for sel in (
+        '.auth-captcha-option',
+        '.auth-capcha-option',
+        './/button',
+        './/a',
+        './/div[@role="button"]',
+    ):
+        try:
+            if sel.startswith('.') or sel.startswith('['):
+                elems = ch.find_elements(By.CSS_SELECTOR, sel)
+            else:
+                elems = ch.find_elements(By.XPATH, sel)
+            visible = [e for e in elems if e.is_displayed() and e.is_enabled()]
+            if visible:
+                return visible
+        except Exception:
+            continue
+    return []
+
+
+def _get_option_text(opt):
+    """收集一个选项的所有可能文本信息，用于匹配目标。"""
+    parts = []
+    try:
+        t = (opt.text or '').strip()
+        if t:
+            parts.append(t)
+    except Exception:
+        pass
+    for attr in ('aria-label', 'title', 'data-value', 'value', 'name'):
+        try:
+            t = (opt.get_attribute(attr) or '').strip()
+            if t:
+                parts.append(t)
+        except Exception:
+            pass
+    try:
+        for img in opt.find_elements(By.TAG_NAME, 'img'):
+            for attr in ('alt', 'title', 'data-name'):
+                t = (img.get_attribute(attr) or '').strip()
+                if t:
+                    parts.append(t)
+            src = (img.get_attribute('src') or '').strip()
+            if src:
+                fname = src.split('/')[-1].split('?')[0]
+                name = re.sub(r'\.(png|jpg|jpeg|webp|gif|svg)$', '', fname, flags=re.I)
+                if name:
+                    parts.append(name)
+    except Exception:
+        pass
+    return ' '.join(parts).lower()
+
+
+def handle_captcha_challenge(sb, label='验证码', timeout=20):
+    start_time = time.time()
+    challenge_selectors = [
+        '.auth-captcha-challenge',
+        '.auth-capcha-challenge',
+        '//*[contains(@class, "captcha") and contains(@class, "challenge")]',
+        '//*[contains(@aria-label, "Click on ") or contains(@aria-label, "Select ") or contains(@class, "challenge")]',
+    ]
+
+    challenge = None
+    while time.time() - start_time < timeout:
+        challenge = _get_challenge(sb, challenge_selectors)
+        if challenge:
+            print(f"{label} 检测到图形验证码挑战")
+            break
+        try:
+            checkbox = sb.driver.find_element(By.CSS_SELECTOR, 'div.auth-captcha-inner[role="checkbox"]')
+            if checkbox.get_attribute('aria-checked') == 'true':
+                print(f"{label} 验证复选框已勾选")
+                return True
+        except Exception:
+            pass
+        sb.sleep(0.3)
+
+    if not challenge:
+        print(f"{label} 等待验证码挑战加载超时")
+        return False
+
+    target = _get_captcha_target(challenge)
+    print(f"{label} 目标文本: {target or '未识别'}")
+
+    # 记录上一次的选项数量和已尝试过的索引
+    tried_indices = set()
+    last_option_count = 0
+    attempts = 0
+    max_attempts = 10
+
+    while attempts < max_attempts:
+        challenge = _get_challenge(sb, challenge_selectors)
+        if not challenge:
+            print(f"{label} 挑战已消失，验证完成")
+            return True
+
+        options = _get_captcha_options(challenge)
+        if not options:
+            attempts += 1
+            sb.sleep(0.8)
+            continue
+
+        # 选项数量变化 → 说明刷新了，重置尝试记录
+        if len(options) != last_option_count:
+            tried_indices.clear()
+            last_option_count = len(options)
+
+        # 每次重新读目标（可能刷新）
+        current_target = _get_captcha_target(challenge) or target
+
+        # 策略 1：文本匹配
+        matched_idx = None
+        if current_target:
+            target_lower = current_target.lower()
+            for i, opt in enumerate(options):
+                opt_text = _get_option_text(opt)
+                if opt_text and target_lower in opt_text:
+                    matched_idx = i
+                    print(f"{label} 文本匹配到选项 #{i + 1}: '{opt_text[:60]}'")
+                    break
+
+        # 策略 2：轮询未尝试过的选项
+        if matched_idx is None:
+            for i in range(len(options)):
+                if i not in tried_indices:
+                    matched_idx = i
+                    print(f"{label} 无匹配，轮询选项 #{i + 1}")
+                    break
+            if matched_idx is None:
+                tried_indices.clear()
+                matched_idx = 0
+                print(f"{label} 全部尝试过，重置从 #1 开始")
+
+        candidate = options[matched_idx]
+        tried_indices.add(matched_idx)
+
+        print(f"{label} 点击候选选项 #{attempts + 1} (index={matched_idx}) ...")
+        if not safe_click_element(sb, candidate, f"{label} 选项"):
+            attempts += 1
+            sb.sleep(0.8)
+            continue
+        sb.sleep(4)
+
+        try:
+            checkbox = sb.driver.find_element(By.CSS_SELECTOR, 'div.auth-captcha-inner[role="checkbox"]')
+            if checkbox.get_attribute('aria-checked') == 'true':
+                print(f"{label} 验证复选框已勾选")
+                return True
+        except Exception:
+            pass
+
+        if not _get_challenge(sb, challenge_selectors):
+            print(f"{label} 挑战已消失，验证完成")
+            return True
+
+        attempts += 1
+
+    print(f"{label} 多次尝试后仍未完成验证码")
+    return False
+
+
+def click_captcha_checkbox(sb, label='验证码', timeout=10):
+    selectors = [
+        'div.auth-captcha-inner[role="checkbox"]',
+        '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
+        '//div[contains(., "I am not a robot")]//*[@role="checkbox"]',
+    ]
+    last_error = None
+    selector = None
+    clicked = False
+    for candidate in selectors:
+        try:
+            sb.wait_for_element_visible(candidate, timeout=timeout)
+            scroll_to_selector(sb, candidate)
+            sb.uc_click(candidate)
+            sb.sleep(1)
+            selector = candidate
+            clicked = True
+            break
+        except Exception as e:
+            last_error = e
+    if not clicked:
+        print(f"{label} 点击复选框失败: {last_error}")
+        return False
+
+    sb.sleep(5)
+    if not handle_captcha_challenge(sb, label, timeout=20):
+        print(f"{label} 验证流程未完成")
+        return False
+
+    try:
+        checked = sb.get_attribute(selector, 'aria-checked')
+        if checked == 'true':
+            print(f"{label} 验证通过")
+            return True
+        print(f"{label} 验证未完成，状态: {checked}")
+        return False
+    except Exception:
+        return False
+
+
+# ==================== div-based 表格解析 ====================
 
 def parse_project_table(sb):
-    """
-    解析 ACLClouds 项目页的 div-based 表格。
-    关键改进：全局扫描所有 Details 按钮，按 UUID 建立项目名映射。
-    """
     js_script = '''
     const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
-    // ===== 第一步：全局建立 uuid -> 项目名 的映射 =====
     const detailNameMap = {};
 
-    // 1) 通过 aria-controls="service-details-{uuid}"
     document.querySelectorAll('[aria-controls^="service-details-"]').forEach(btn => {
         const controls = btn.getAttribute('aria-controls') || '';
         const uuid = controls.replace('service-details-', '').toLowerCase();
@@ -148,7 +391,6 @@ def parse_project_table(sb):
         if (m) detailNameMap[uuid] = m[1].trim();
     });
 
-    // 2) 通过 aria-label 以 Details 开头的按钮（可能没有 aria-controls）
     document.querySelectorAll(
         '[aria-label^="Details"], [aria-label^="Détails"], [aria-label^="详情"]'
     ).forEach(btn => {
@@ -156,7 +398,6 @@ def parse_project_table(sb):
         const m = label.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i);
         if (!m) return;
         const name = m[1].trim();
-        // 向上找最近的包含 UUID 的祖先
         let cur = btn;
         for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
             const txt = (cur.innerText || '');
@@ -168,7 +409,6 @@ def parse_project_table(sb):
         }
     });
 
-    // 3) 通过 h3 标题 + 最近的 UUID 祖先（卡片视图兜底）
     document.querySelectorAll('h3, h4').forEach(h => {
         const name = (h.textContent || '').trim();
         if (!name) return;
@@ -184,7 +424,6 @@ def parse_project_table(sb):
         }
     });
 
-    // ===== 第二步：解析表格行 =====
     const all = document.querySelectorAll('*');
     const uuidNodes = [];
     for (const el of all) {
@@ -218,7 +457,6 @@ def parse_project_table(sb):
         if (seen.has(uuid)) continue;
         seen.add(uuid);
 
-        // 行内可能仍有 Details 按钮（双保险）
         let inlineDetailsLabel = '';
         try {
             const detailBtn = row.querySelector(
@@ -240,7 +478,6 @@ def parse_project_table(sb):
             if (s) texts.push(s);
         }
 
-        // ★ 优先用全局映射，其次用行内按钮
         const mappedName = detailNameMap[uuid] || '';
         const inlineName = inlineDetailsLabel
             ? (inlineDetailsLabel.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i) || [])[1] || ''
@@ -321,12 +558,10 @@ def extract_name_from_details_label(label):
 
 
 def get_project_name_from_item(item):
-    # ★ 首选：Details 按钮的 aria-label（现在由全局映射填充）
     name = extract_name_from_details_label(item.get('details_label', ''))
     if name:
         return name
 
-    # 回退：MODEL / TYPE
     model = (item.get('model') or '').strip()
     type_ = (item.get('type') or '').strip()
     if model and type_:
@@ -364,7 +599,7 @@ def find_renew_button_for_uuid(sb, uuid):
         return []
 
 
-# ==================== 诊断 & 验证码 ====================
+# ==================== 诊断 ====================
 
 def log_projects_page_diagnostics(sb):
     try:
@@ -374,170 +609,6 @@ def log_projects_page_diagnostics(sb):
     print(f"项目页诊断 URL: {sb.get_current_url()}")
     print(f"项目页诊断标题: {sb.get_title()}")
     print(f"项目页可见文本摘要: {body_text[:1200]}")
-
-
-def click_captcha_checkbox(sb, label='验证码', timeout=10):
-    selectors = [
-        'div.auth-captcha-inner[role="checkbox"]',
-        '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
-        '//div[contains(., "I am not a robot")]//*[@role="checkbox"]',
-    ]
-    last_error = None
-    selector = None
-    clicked = False
-    for candidate in selectors:
-        try:
-            sb.wait_for_element_visible(candidate, timeout=timeout)
-            scroll_to_selector(sb, candidate)
-            sb.uc_click(candidate)
-            sb.sleep(1)
-            selector = candidate
-            clicked = True
-            break
-        except Exception as e:
-            last_error = e
-    if not clicked:
-        print(f"{label} 点击复选框失败: {last_error}")
-        return False
-
-    sb.sleep(5)
-    if not handle_captcha_challenge(sb, label, timeout=20):
-        print(f"{label} 验证流程未完成")
-        return False
-
-    try:
-        checked = sb.get_attribute(selector, 'aria-checked')
-        if checked == 'true':
-            print(f"{label} 验证通过")
-            return True
-        print(f"{label} 验证未完成，状态: {checked}")
-        return False
-    except Exception:
-        return False
-
-
-def handle_captcha_challenge(sb, label='验证码', timeout=20):
-    start_time = time.time()
-    challenge_selectors = [
-        '.auth-captcha-challenge',
-        '.auth-capcha-challenge',
-        '//*[contains(@class, "captcha") and contains(@class, "challenge")]',
-        '//*[contains(@aria-label, "Click on ") or contains(@aria-label, "Select ") or contains(@class, "challenge")]',
-    ]
-
-    def get_challenge():
-        for selector in challenge_selectors:
-            try:
-                if selector.startswith('/'):
-                    for elem in sb.driver.find_elements(By.XPATH, selector):
-                        if elem.is_displayed():
-                            return elem
-                else:
-                    elem = sb.wait_for_element_visible(selector, timeout=1)
-                    if elem and elem.is_displayed():
-                        return elem
-            except Exception:
-                continue
-        return None
-
-    challenge = None
-    while time.time() - start_time < timeout:
-        challenge = get_challenge()
-        if challenge:
-            print(f"{label} 检测到图形验证码挑战")
-            break
-        try:
-            checkbox = sb.driver.find_element(By.CSS_SELECTOR, 'div.auth-captcha-inner[role="checkbox"]')
-            if checkbox.get_attribute('aria-checked') == 'true':
-                print(f"{label} 验证复选框已勾选")
-                return True
-        except Exception:
-            pass
-        sb.sleep(0.3)
-
-    if not challenge:
-        print(f"{label} 等待验证码挑战加载超时")
-        return False
-
-    target = ''
-    try:
-        target = challenge.find_element(By.CSS_SELECTOR, '.auth-captcha-prompt strong').text.strip()
-    except Exception:
-        pass
-    if not target:
-        aria_label = challenge.get_attribute('aria-label') or ''
-        if 'Click on ' in aria_label:
-            target = aria_label.split('Click on ')[-1].strip()
-    print(f"{label} 目标文本: {target or '未识别'}")
-
-    option_selectors = [
-        '.auth-captcha-option',
-        '.auth-capcha-option',
-        './/button',
-        './/a',
-        './/div[@role="button"]',
-    ]
-
-    def get_options(challenge_elem):
-        for sel in option_selectors:
-            try:
-                if sel.startswith('.') or sel.startswith('['):
-                    elems = challenge_elem.find_elements(By.CSS_SELECTOR, sel)
-                else:
-                    elems = challenge_elem.find_elements(By.XPATH, sel)
-                if elems:
-                    return [e for e in elems if e.is_displayed() and e.is_enabled()]
-            except Exception:
-                continue
-        return []
-
-    attempts = 0
-    while attempts < 8:
-        challenge = get_challenge()
-        if not challenge:
-            return False
-        options = get_options(challenge)
-        if not options:
-            attempts += 1
-            sb.sleep(0.8)
-            continue
-
-        candidate = None
-        if target:
-            for opt in options:
-                opt_text = (opt.text or '').strip()
-                if not opt_text:
-                    try:
-                        opt_text = (opt.find_element(By.TAG_NAME, 'img').get_attribute('alt') or '').strip()
-                    except Exception:
-                        pass
-                if opt_text and target.lower() in opt_text.lower():
-                    candidate = opt
-                    break
-        if candidate is None:
-            candidate = options[0]
-
-        print(f"{label} 点击候选选项 #{attempts + 1} ...")
-        if not safe_click_element(sb, candidate, f"{label} 选项"):
-            attempts += 1
-            sb.sleep(0.8)
-            continue
-        sb.sleep(4.5)
-
-        try:
-            checkbox = sb.driver.find_element(By.CSS_SELECTOR, 'div.auth-captcha-inner[role="checkbox"]')
-            if checkbox.get_attribute('aria-checked') == 'true':
-                print(f"{label} 验证复选框已勾选")
-                return True
-        except Exception:
-            pass
-        if not get_challenge():
-            print(f"{label} 挑战已消失，验证完成")
-            return True
-        attempts += 1
-
-    print(f"{label} 多次尝试后仍未完成验证码")
-    return False
 
 
 # ==================== 通知消息 ====================
@@ -569,7 +640,7 @@ def build_success_message(project_name, old_expiry, new_expiry):
 
 
 def build_not_yet_due_message(project_name, expiry, note=''):
-    lines = [
+    return "\n".join([
         "🇫🇷 Aclclouds 续期通知",
         "",
         "⏳ 未到续期时间",
@@ -577,8 +648,7 @@ def build_not_yet_due_message(project_name, expiry, note=''):
         f"⏱️ 当前过期时间: {expiry}",
         f"👤 登录账户: {mask_email(EMAIL)}",
         f"⏱️ 运行时间: {beijing_time_str()}",
-    ]
-    return "\n".join(lines)
+    ])
 
 
 def build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note):
@@ -615,7 +685,7 @@ def handle_renew_antibot(sb, project_name):
     return False
 
 
-# ==================== 登录 ====================
+# ==================== 登录（带重试） ====================
 
 def js_set_input_value(sb, selector, value):
     sb.execute_script(
@@ -648,47 +718,58 @@ def fill_input(sb, selector, value, label, timeout=15):
     return entered == value
 
 
-def login(sb, email, password):
-    print("开始登录流程...")
-    fill_input(sb, '#username', email, '邮箱')
-    fill_input(sb, '#password', password, '密码')
-    if not click_captcha_checkbox(sb, '登录验证码'):
-        print("⚠️ 登录验证码未完成")
-        return False
-    sb.sleep(1)
-    login_page_url = sb.get_current_url()
-    clicked = False
-    for selector in ['button[type="submit"]', 'div.auth-submit-btn',
-                     '//button[contains(text(), "Sign in")]',
-                     '//div[contains(text(), "Sign in")]']:
+def login(sb, email, password, max_retries=3):
+    for retry in range(max_retries):
+        if retry > 0:
+            print(f"🔄 登录重试 #{retry + 1}/{max_retries}")
+            sb.open(f"{BASE_URL}{LOGIN_PATH}")
+            sb.wait_for_ready_state_complete()
+            sb.sleep(2)
+
+        print(f"开始登录流程（尝试 {retry + 1}/{max_retries}）...")
+        fill_input(sb, '#username', email, '邮箱')
+        fill_input(sb, '#password', password, '密码')
+
+        if not click_captcha_checkbox(sb, '登录验证码'):
+            print("⚠️ 登录验证码未完成，准备重试")
+            continue
+
+        sb.sleep(1)
+        login_page_url = sb.get_current_url()
+        clicked = False
+        for selector in ['button[type="submit"]', 'div.auth-submit-btn',
+                         '//button[contains(text(), "Sign in")]',
+                         '//div[contains(text(), "Sign in")]']:
+            try:
+                sb.wait_for_element_visible(selector, timeout=5)
+                scroll_to_selector(sb, selector)
+                sb.click(selector)
+                clicked = True
+                print(f"点击 Sign in 使用: {selector}")
+                break
+            except Exception as e:
+                print(f"选择器 {selector} 失败: {e}")
+        if not clicked:
+            sb.execute_script('''
+                var els = document.querySelectorAll('div, button, a');
+                for (var el of els) {
+                    if (el.textContent.trim() === 'Sign in') { el.click(); return true; }
+                }
+                return false;
+            ''')
+
         try:
-            sb.wait_for_element_visible(selector, timeout=5)
-            scroll_to_selector(sb, selector)
-            sb.click(selector)
-            clicked = True
-            print(f"点击 Sign in 使用: {selector}")
-            break
+            wait_for_url_change(sb, login_page_url, timeout=30)
+            current = sb.get_current_url()
+            if '/auth/login' not in current and '/dashboard' in current:
+                print(f"✅ 登录成功！URL: {current}")
+                return True
+            print(f"❌ 登录失败，当前: {current}")
         except Exception as e:
-            print(f"选择器 {selector} 失败: {e}")
-    if not clicked:
-        sb.execute_script('''
-            var els = document.querySelectorAll('div, button, a');
-            for (var el of els) {
-                if (el.textContent.trim() === 'Sign in') { el.click(); return true; }
-            }
-            return false;
-        ''')
-    try:
-        wait_for_url_change(sb, login_page_url, timeout=30)
-        current = sb.get_current_url()
-        if '/auth/login' not in current and '/dashboard' in current:
-            print(f"✅ 登录成功！URL: {current}")
-            return True
-        print(f"❌ 登录失败，当前: {current}")
-        return False
-    except Exception as e:
-        print(f"登录过程异常: {e}")
-        return False
+            print(f"登录过程异常: {e}")
+
+    print(f"❌ {max_retries} 次尝试后登录仍失败")
+    return False
 
 
 # ==================== 代理 / IP ====================
@@ -744,7 +825,8 @@ def main():
                 print("❌ 未配置 EMAIL 或 PASSWORD")
                 send_telegram("⚠️ 未配置 EMAIL 或 PASSWORD。")
                 return
-            if not login(sb, EMAIL, PASSWORD):
+            if not login(sb, EMAIL, PASSWORD, max_retries=3):
+                send_telegram("⚠️ 登录失败（已重试 3 次），请检查账号或验证码。")
                 return
             sb.open(PROJECTS_URL)
             sb.wait_for_ready_state_complete()
