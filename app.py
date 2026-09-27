@@ -106,17 +106,9 @@ def safe_click_element(sb, element, label):
         return False
 
 
-def element_text(element):
-    try:
-        return element.text.strip()
-    except Exception:
-        return ''
-
-
 # ==================== SPA 等待 ====================
 
 def wait_for_spa_ready(sb, timeout=20):
-    """等待页面上出现 UUID 格式文本（说明表格已渲染）。"""
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -136,10 +128,63 @@ def wait_for_spa_ready(sb, timeout=20):
 # ==================== div-based 表格解析（核心） ====================
 
 def parse_project_table(sb):
-    """解析 ACLClouds 项目页的 div-based 表格，同时抓取 Details 按钮的 aria-label。"""
+    """
+    解析 ACLClouds 项目页的 div-based 表格。
+    关键改进：全局扫描所有 Details 按钮，按 UUID 建立项目名映射。
+    """
     js_script = '''
     const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
+    // ===== 第一步：全局建立 uuid -> 项目名 的映射 =====
+    const detailNameMap = {};
+
+    // 1) 通过 aria-controls="service-details-{uuid}"
+    document.querySelectorAll('[aria-controls^="service-details-"]').forEach(btn => {
+        const controls = btn.getAttribute('aria-controls') || '';
+        const uuid = controls.replace('service-details-', '').toLowerCase();
+        if (!uuid) return;
+        const label = btn.getAttribute('aria-label') || '';
+        const m = label.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i);
+        if (m) detailNameMap[uuid] = m[1].trim();
+    });
+
+    // 2) 通过 aria-label 以 Details 开头的按钮（可能没有 aria-controls）
+    document.querySelectorAll(
+        '[aria-label^="Details"], [aria-label^="Détails"], [aria-label^="详情"]'
+    ).forEach(btn => {
+        const label = btn.getAttribute('aria-label') || '';
+        const m = label.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i);
+        if (!m) return;
+        const name = m[1].trim();
+        // 向上找最近的包含 UUID 的祖先
+        let cur = btn;
+        for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
+            const txt = (cur.innerText || '');
+            const um = txt.match(UUID_RE);
+            if (um) {
+                detailNameMap[um[0].toLowerCase()] = name;
+                break;
+            }
+        }
+    });
+
+    // 3) 通过 h3 标题 + 最近的 UUID 祖先（卡片视图兜底）
+    document.querySelectorAll('h3, h4').forEach(h => {
+        const name = (h.textContent || '').trim();
+        if (!name) return;
+        let cur = h;
+        for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
+            const txt = (cur.innerText || '');
+            const um = txt.match(UUID_RE);
+            if (um) {
+                const uuid = um[0].toLowerCase();
+                if (!detailNameMap[uuid]) detailNameMap[uuid] = name;
+                break;
+            }
+        }
+    });
+
+    // ===== 第二步：解析表格行 =====
     const all = document.querySelectorAll('*');
     const uuidNodes = [];
     for (const el of all) {
@@ -173,19 +218,17 @@ def parse_project_table(sb):
         if (seen.has(uuid)) continue;
         seen.add(uuid);
 
-        // 抓取行内 Details / Détails / 详情 按钮的 aria-label
-        let detailsLabel = '';
+        // 行内可能仍有 Details 按钮（双保险）
+        let inlineDetailsLabel = '';
         try {
             const detailBtn = row.querySelector(
                 '[aria-controls^="service-details-"], ' +
                 '[aria-label^="Details"], ' +
                 '[aria-label^="Détails"], ' +
-                '[aria-label^="详情"], ' +
-                'button[title="Details"], ' +
-                'button[title="Détails"]'
+                '[aria-label^="详情"]'
             );
             if (detailBtn) {
-                detailsLabel = detailBtn.getAttribute('aria-label') || '';
+                inlineDetailsLabel = detailBtn.getAttribute('aria-label') || '';
             }
         } catch (e) {}
 
@@ -196,7 +239,18 @@ def parse_project_table(sb):
             const s = (t.textContent || '').trim();
             if (s) texts.push(s);
         }
-        rows.push({ uuid: uuid, texts: texts, detailsLabel: detailsLabel });
+
+        // ★ 优先用全局映射，其次用行内按钮
+        const mappedName = detailNameMap[uuid] || '';
+        const inlineName = inlineDetailsLabel
+            ? (inlineDetailsLabel.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i) || [])[1] || ''
+            : '';
+
+        rows.push({
+            uuid: uuid,
+            texts: texts,
+            detailsLabel: mappedName || inlineName || ''
+        });
     }
     return rows;
     '''
@@ -258,7 +312,6 @@ def parse_project_table(sb):
 
 
 def extract_name_from_details_label(label):
-    """从 'Details : Mon VPS' 里提取 'Mon VPS'。"""
     if not label:
         return ''
     m = DETAILS_LABEL_RE.match(label.strip())
@@ -268,7 +321,7 @@ def extract_name_from_details_label(label):
 
 
 def get_project_name_from_item(item):
-    # ★ 首选：Details 按钮的 aria-label
+    # ★ 首选：Details 按钮的 aria-label（现在由全局映射填充）
     name = extract_name_from_details_label(item.get('details_label', ''))
     if name:
         return name
@@ -296,7 +349,6 @@ def get_renewal_available_note(item):
 
 
 def find_renew_button_for_uuid(sb, uuid):
-    """在页面上找到某个 UUID 所在行的续期按钮。"""
     xpath = (
         f'//*[contains(text(), "{uuid}")]'
         f'/ancestor::*[position()<=8]'
@@ -517,7 +569,6 @@ def build_success_message(project_name, old_expiry, new_expiry):
 
 
 def build_not_yet_due_message(project_name, expiry, note=''):
-    # ★ 保持最初的简洁格式，不拼接 note
     lines = [
         "🇫🇷 Aclclouds 续期通知",
         "",
