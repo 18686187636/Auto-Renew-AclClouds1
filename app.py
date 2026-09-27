@@ -30,6 +30,7 @@ _LOWER = "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"
 # ★ 全局缓存
 _NAME_CACHE = {}          # UUID -> 项目名
 _RENEWAL_NOTE_CACHE = {}  # UUID -> 续期提示文本
+_EXPIRY_CACHE = {}        # UUID -> 过期时间（duration 优先）
 
 
 def beijing_time_str():
@@ -380,7 +381,7 @@ def find_project_cards(sb):
                 uuid = ''
 
             # 缓存命中：跳过点击
-            if uuid and uuid in _NAME_CACHE and uuid in _RENEWAL_NOTE_CACHE:
+            if uuid and uuid in _NAME_CACHE and uuid in _RENEWAL_NOTE_CACHE and uuid in _EXPIRY_CACHE:
                 print(f"  ✅ 从缓存读取: {_NAME_CACHE[uuid]} (uuid={uuid[:8]})")
                 cards.append(row)
                 continue
@@ -456,7 +457,31 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取 Nom personnalisé 失败: {e}")
 
-            # 3) 读续期提示：全局搜索 + 智能兜底
+            # 3) ★ 读过期时间（优先 duration）★
+            expiry = ''
+            try:
+                expiry = sb.driver.execute_script('''
+                    const results = [];
+                    document.querySelectorAll('div, span, p, strong').forEach(el => {
+                        const t = (el.textContent || '').trim();
+                        if (/^Expire dans$|^Expires in$|^Expire le$|^Expires on$|^到期$|^过期$/i.test(t)) {
+                            let sib = el.nextElementSibling;
+                            if (sib) {
+                                const v = (sib.textContent || '').trim();
+                                if (v && v.length <= 60) results.push(v);
+                            }
+                        }
+                    });
+                    // 优先 duration（含 j/h/d 单位）
+                    for (const r of results) {
+                        if (/\\d+\\s*(?:j|h|jours?|heures?|days?|hours?|d|天|小时)\\b/i.test(r)) return r;
+                    }
+                    return results.length ? results[0] : '';
+                ''') or ''
+            except Exception as e:
+                print(f"  读取过期时间失败: {e}")
+
+            # 4) 读续期提示
             renewal_note = ''
             try:
                 renewal_note = sb.driver.execute_script('''
@@ -474,10 +499,9 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取续期提示失败: {e}")
 
-            # 智能兜底：如果页面没显示提示，根据过期时间生成
+            # 智能兜底
             if not renewal_note:
-                expiry = get_project_expiry(row)
-                if expiry and expiry != '未知':
+                if expiry:
                     m_days = re.match(r'(\d+)\s*j', expiry)
                     if m_days:
                         days_left = int(m_days.group(1))
@@ -488,13 +512,20 @@ def find_project_cards(sb):
                     else:
                         renewal_note = 'Renewal will be available 2 days before expiration'
 
-            # 4) 写入缓存
+            # 5) 写入缓存
             if name:
                 if uuid:
                     _NAME_CACHE[uuid] = name
                 print(f"  ✅ 项目名: {name} (uuid={uuid[:8] or '-'})")
             else:
                 print(f"  ⚠️ 未能读到项目名 (uuid={uuid[:8] or '-'})")
+
+            if expiry:
+                if uuid:
+                    _EXPIRY_CACHE[uuid] = expiry
+                print(f"  ⏱️ 过期时间: {expiry}")
+            else:
+                print(f"  ⚠️ 未能读到过期时间 (uuid={uuid[:8] or '-'})")
 
             if renewal_note:
                 if uuid:
@@ -579,7 +610,6 @@ def extract_duration_like(text):
 
 
 def get_project_name(card, idx):
-    # 优先：缓存
     try:
         uuid = (card.get_attribute('data-acl-uuid') or '').lower()
         if uuid and uuid in _NAME_CACHE:
@@ -587,7 +617,6 @@ def get_project_name(card, idx):
     except Exception:
         pass
 
-    # 兜底：从文本里提 UUID
     try:
         text = element_text(card)
         m = re.search(
@@ -599,7 +628,6 @@ def get_project_name(card, idx):
     except Exception:
         pass
 
-    # 兜底：XPath
     try:
         for strong in card.find_elements(
             By.XPATH,
@@ -613,7 +641,6 @@ def get_project_name(card, idx):
     except Exception:
         pass
 
-    # 原有逻辑：CSS 选择器
     selectors = [
         '.projects-card-title',
         'h1', 'h2', 'h3', 'h4',
@@ -631,7 +658,6 @@ def get_project_name(card, idx):
         except Exception:
             continue
 
-    # 原有逻辑：文本逐行扫描
     for line in element_text(card).splitlines():
         line = line.strip()
         if line and len(line) <= 80 \
@@ -647,6 +673,26 @@ def get_project_name(card, idx):
 
 
 def get_project_expiry(card):
+    # ★★★ 优先：从缓存（duration 优先）★★★
+    try:
+        uuid = (card.get_attribute('data-acl-uuid') or '').lower()
+        if uuid and uuid in _EXPIRY_CACHE:
+            return _EXPIRY_CACHE[uuid]
+    except Exception:
+        pass
+
+    try:
+        text = element_text(card)
+        m = re.search(
+            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+            text, re.I
+        )
+        if m and m.group(0).lower() in _EXPIRY_CACHE:
+            return _EXPIRY_CACHE[m.group(0).lower()]
+    except Exception:
+        pass
+
+    # 原有逻辑：Expire 标签
     for label in EXPIRE_LABELS:
         try:
             labels = card.find_elements(
@@ -663,6 +709,12 @@ def get_project_expiry(card):
                     return text
         except Exception:
             continue
+
+    # ★ 次级优先：从卡片文本里找 duration（"3j 17h"）
+    card_text = element_text(card)
+    dur = extract_duration_like(card_text)
+    if dur:
+        return dur
 
     selectors = [
         '.projects-expiry-value',
@@ -691,8 +743,7 @@ def get_project_expiry(card):
         except Exception:
             continue
 
-    card_text = element_text(card)
-    return extract_date_like(card_text) or extract_duration_like(card_text) or '未知'
+    return extract_date_like(card_text) or '未知'
 
 
 def read_expiry_from_page(sb):
@@ -728,7 +779,6 @@ def read_expiry_from_page(sb):
 
 
 def get_renewal_available_note(card):
-    # 优先从缓存
     try:
         uuid = (card.get_attribute('data-acl-uuid') or '').lower()
         if uuid and uuid in _RENEWAL_NOTE_CACHE:
@@ -736,7 +786,6 @@ def get_renewal_available_note(card):
     except Exception:
         pass
 
-    # 兜底从文本提 UUID
     try:
         text = element_text(card)
         m = re.search(
@@ -748,7 +797,6 @@ def get_renewal_available_note(card):
     except Exception:
         pass
 
-    # 原有逻辑
     text = element_text(card)
     patterns = [
         r'Renewal\s+will\s+be\s+available[^\n]*',
