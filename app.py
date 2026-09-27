@@ -11,7 +11,7 @@ from selenium.common.exceptions import ElementClickInterceptedException, WebDriv
 from selenium.webdriver.common.by import By
 from zoneinfo import ZoneInfo
 
-# ----- 配置（从环境变量读取或在双引号内填写） -----
+# ----- 配置 -----
 EMAIL = os.getenv('EMAIL') or ""
 PASSWORD = os.getenv('PASSWORD') or ""
 TG_CHAT_ID = os.getenv('TG_CHAT_ID') or ""
@@ -26,6 +26,9 @@ SUCCESS_KEYWORDS = ('successfully', 'avec succès', 'réussi', 'succès', '成�
 
 _UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ"
 _LOWER = "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"
+
+# ★ 全局缓存：UUID -> 项目名
+_NAME_CACHE = {}
 
 
 def beijing_time_str():
@@ -270,7 +273,7 @@ def find_card_container_from_child(sb, child):
     )
 
 
-# ==================== 修改点：find_project_cards ====================
+# ==================== find_project_cards ====================
 
 def find_project_cards(sb):
     cards = []
@@ -357,6 +360,8 @@ def find_project_cards(sb):
                     const uuid = um[0].toLowerCase();
                     if (seen.has(uuid)) continue;
                     seen.add(uuid);
+                    // ★ 把 UUID 写到属性上，Python 侧能直接读
+                    row.setAttribute('data-acl-uuid', uuid);
                     rows.push(row);
                 }
                 return rows;
@@ -366,10 +371,22 @@ def find_project_cards(sb):
             rows = []
 
         if rows:
-            print(f"表格回退：找到 {len(rows)} 行，尝试点击 Actif 展开...")
+            print(f"表格回退：找到 {len(rows)} 行")
 
         for row in rows:
-            # ===== 1) 优先找行内 "Actif"/"Active" 标签来点击展开 =====
+            # ===== 读 UUID =====
+            try:
+                uuid = (row.get_attribute('data-acl-uuid') or '').lower()
+            except Exception:
+                uuid = ''
+
+            # ===== 如果缓存里已有名字，跳过点击 =====
+            if uuid and uuid in _NAME_CACHE:
+                print(f"  ✅ 从缓存读取: {_NAME_CACHE[uuid]} (uuid={uuid[:8]})")
+                cards.append(row)
+                continue
+
+            # ===== 1) 找行内 "Actif"/"Active" 标签点击展开 =====
             status_els = []
             try:
                 status_els = row.find_elements(
@@ -402,7 +419,6 @@ def find_project_cards(sb):
                 except Exception as e:
                     print(f"  点击 Actif 失败: {e}")
             else:
-                # 回退到 Details 按钮
                 btns = []
                 try:
                     btns = row.find_elements(
@@ -441,15 +457,13 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取 Nom personnalisé 失败: {e}")
 
-            # ===== 3) 写到 data-acl-project-name =====
+            # ===== 3) ★ 写入全局缓存（关键）★ =====
             if name:
-                print(f"  ✅ 读到项目名: {name}")
-                try:
-                    row.set_attribute('data-acl-project-name', name)
-                except Exception:
-                    pass
+                if uuid:
+                    _NAME_CACHE[uuid] = name
+                print(f"  ✅ 读到项目名: {name} (uuid={uuid[:8] or '-'})")
             else:
-                print("  ⚠️ 未能读到项目名")
+                print(f"  ⚠️ 未能读到项目名 (uuid={uuid[:8] or '-'})")
 
             cards.append(row)
 
@@ -527,15 +541,27 @@ def extract_duration_like(text):
 
 
 def get_project_name(card, idx):
-    # 优先读 JS 侧写入的项目名
+    # ★★★ 优先：从全局缓存查 UUID → 项目名 ★★★
     try:
-        name = (card.get_attribute('data-acl-project-name') or '').strip()
-        if name:
-            return name
+        uuid = (card.get_attribute('data-acl-uuid') or '').lower()
+        if uuid and uuid in _NAME_CACHE:
+            return _NAME_CACHE[uuid]
     except Exception:
         pass
 
-    # ★ 兜底：直接 XPath 找 "Nom personnalisé : <strong>X</strong>"
+    # 兜底：从 card 文本里提取 UUID 查缓存
+    try:
+        text = element_text(card)
+        m = re.search(
+            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+            text, re.I
+        )
+        if m and m.group(0).lower() in _NAME_CACHE:
+            return _NAME_CACHE[m.group(0).lower()]
+    except Exception:
+        pass
+
+    # 兜底：直接 XPath 找 "Nom personnalisé : <strong>X</strong>"
     try:
         for strong in card.find_elements(
             By.XPATH,
@@ -1238,7 +1264,6 @@ def main():
             sb.wait_for_ready_state_complete()
             time.sleep(3)
 
-        # 等待页面基本渲染
         print("等待项目列表渲染...")
         start = time.time()
         while time.time() - start < 20:
