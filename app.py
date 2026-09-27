@@ -18,7 +18,6 @@ TG_CHAT_ID = os.getenv('TG_CHAT_ID') or ""
 TG_BOT_TOKEN = os.getenv('TG_BOT_TOKEN') or ""
 
 LOGIN_PATH = '/auth/login'
-# ★ 面板实际在主域名下，不是 dash 子域
 BASE_URL = 'https://aclclouds.com'
 PROJECTS_URL = f'{BASE_URL}/dashboard/projects'
 
@@ -64,7 +63,6 @@ def is_login_page(sb):
     return LOGIN_PATH in sb.get_current_url()
 
 
-# ★ 修复：不再硬编码 dash.aclclouds.com，改用 /dashboard 路径判断
 def is_logged_in(sb):
     url = sb.get_current_url()
     return '/dashboard' in url and '/auth/login' not in url
@@ -275,9 +273,11 @@ def find_card_container_from_child(sb, child):
     )
 
 
+# ★★★ 修改点 1：新增表格行回退逻辑 ★★★
 def find_project_cards(sb):
     cards = []
 
+    # ===== 原有逻辑：Manage 按钮 =====
     try:
         manage_btns = find_manage_buttons(sb.driver)
     except Exception:
@@ -291,6 +291,7 @@ def find_project_cards(sb):
         except Exception:
             continue
 
+    # ===== 原有逻辑：续期按钮 =====
     if not cards:
         try:
             for button in find_renew_buttons(sb.driver):
@@ -303,6 +304,7 @@ def find_project_cards(sb):
         except Exception:
             pass
 
+    # ===== 原有逻辑：Expire 标签 =====
     if not cards:
         anchor_xpath = (
             '//*[self::div or self::span or self::p or self::label or self::small or self::strong or self::td]'
@@ -324,6 +326,98 @@ def find_project_cards(sb):
                     cards.append(card)
             except Exception:
                 continue
+
+    # ===== ★ 新增：div-based 表格行回退 =====
+    if not cards:
+        try:
+            rows = sb.driver.execute_script('''
+                const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+                // 全局建立 uuid -> 项目名 映射
+                const detailNameMap = {};
+
+                // 1) aria-controls="service-details-{uuid}"
+                document.querySelectorAll('[aria-controls^="service-details-"]').forEach(btn => {
+                    const uuid = (btn.getAttribute('aria-controls') || '').replace('service-details-', '').toLowerCase();
+                    const label = btn.getAttribute('aria-label') || '';
+                    const m = label.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i);
+                    if (m && uuid) detailNameMap[uuid] = m[1].trim();
+                });
+
+                // 2) aria-label="Details : ..."
+                document.querySelectorAll('[aria-label^="Details"], [aria-label^="Détails"], [aria-label^="详情"]').forEach(btn => {
+                    const label = btn.getAttribute('aria-label') || '';
+                    const m = label.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i);
+                    if (!m) return;
+                    const name = m[1].trim();
+                    let cur = btn;
+                    for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
+                        const txt = cur.innerText || '';
+                        const um = txt.match(UUID_RE);
+                        if (um) {
+                            const uuid = um[0].toLowerCase();
+                            if (!detailNameMap[uuid]) detailNameMap[uuid] = name;
+                            break;
+                        }
+                    }
+                });
+
+                // 3) h3/h4 标题 + UUID 祖先
+                document.querySelectorAll('h3, h4').forEach(h => {
+                    const name = (h.textContent || '').trim();
+                    if (!name) return;
+                    let cur = h;
+                    for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
+                        const txt = cur.innerText || '';
+                        const um = txt.match(UUID_RE);
+                        if (um) {
+                            const uuid = um[0].toLowerCase();
+                            if (!detailNameMap[uuid]) detailNameMap[uuid] = name;
+                            break;
+                        }
+                    }
+                });
+
+                // 找所有含 UUID 的叶子节点
+                const leaves = [];
+                document.querySelectorAll('*').forEach(el => {
+                    if (el.children.length === 0) {
+                        const t = (el.textContent || '').trim();
+                        if (UUID_RE.test(t)) leaves.push(el);
+                    }
+                });
+
+                // 对每个 UUID，向上找行容器
+                const seen = new Set();
+                const rows = [];
+                for (const n of leaves) {
+                    let cur = n;
+                    let row = null;
+                    for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
+                        if (!cur.parentElement) break;
+                        const text = (cur.innerText || '').trim();
+                        if (text.length > 600) continue;
+                        if (/\\d/.test(text) && text.split('\\n').filter(s => s.trim()).length >= 3) {
+                            row = cur;
+                            break;
+                        }
+                    }
+                    if (!row) continue;
+                    const um = (row.innerText || '').match(UUID_RE);
+                    if (!um) continue;
+                    const uuid = um[0].toLowerCase();
+                    if (seen.has(uuid)) continue;
+                    seen.add(uuid);
+                    // 把项目名写到属性上，供 Python 侧读取
+                    row.setAttribute('data-acl-project-name', detailNameMap[uuid] || '');
+                    rows.push(row);
+                }
+                return rows;
+            ''')
+            for row in rows:
+                cards.append(row)
+        except Exception as e:
+            print(f"表格行回退解析失败: {e}")
 
     return dedupe_project_cards(cards)
 
@@ -367,7 +461,17 @@ def extract_duration_like(text):
     return ''
 
 
+# ★★★ 修改点 2：优先读取 data-acl-project-name ★★★
 def get_project_name(card, idx):
+    # 优先读 JS 侧写入的项目名
+    try:
+        name = (card.get_attribute('data-acl-project-name') or '').strip()
+        if name:
+            return name
+    except Exception:
+        pass
+
+    # 原有逻辑：CSS 选择器
     selectors = [
         '.projects-card-title',
         'h1', 'h2', 'h3', 'h4',
@@ -385,6 +489,7 @@ def get_project_name(card, idx):
         except Exception:
             continue
 
+    # 原有逻辑：文本逐行扫描
     for line in element_text(card).splitlines():
         line = line.strip()
         if line and len(line) <= 80 \
@@ -965,7 +1070,6 @@ def login(sb, email, password):
             return false;
         ''')
 
-    # ★ 不再依赖 dash 子域，改用 /dashboard 路径判断
     try:
         wait_for_url_change(sb, login_page_url, timeout=30)
         current = sb.get_current_url()
@@ -1056,6 +1160,22 @@ def main():
             sb.wait_for_ready_state_complete()
             time.sleep(3)
 
+        # 等待表格渲染（等出现 UUID 格式文本）
+        print("等待项目列表渲染...")
+        start = time.time()
+        while time.time() - start < 20:
+            try:
+                found = sb.driver.execute_script('''
+                    const re = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+                    return re.test(document.body.innerText || '');
+                ''')
+                if found:
+                    break
+            except Exception:
+                pass
+            sb.sleep(0.5)
+        sb.sleep(1)
+
         cards = find_project_cards(sb)
 
         if not cards:
@@ -1121,8 +1241,10 @@ def main():
 
                 manage_btn = find_manage_buttons(card)
                 if not manage_btn:
-                    print(f"[{project_name}] 无 Manage 按钮，过期时间未知")
-                    send_telegram(build_not_yet_due_message(project_name, '未知'))
+                    # ★★★ 修改点 3：从卡片文本直接读过期时间，而不是硬编码 '未知' ★★★
+                    expiry = get_project_expiry(card)
+                    print(f"[{project_name}] 无 Manage 按钮，从卡片读取过期时间: {expiry}")
+                    send_telegram(build_not_yet_due_message(project_name, expiry))
                     continue
 
                 print(f"[{project_name}] 进入 Manage 详情页读取过期时间...")
