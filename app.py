@@ -11,7 +11,7 @@ from selenium.common.exceptions import ElementClickInterceptedException, WebDriv
 from selenium.webdriver.common.by import By
 from zoneinfo import ZoneInfo
 
-# ----- 配置（从环境变量读取或在双引号内填写） -----
+# ----- 配置 -----
 EMAIL = os.getenv('EMAIL') or ""
 PASSWORD = os.getenv('PASSWORD') or ""
 TG_CHAT_ID = os.getenv('TG_CHAT_ID') or ""
@@ -21,7 +21,6 @@ LOGIN_PATH = '/auth/login'
 BASE_URL = 'https://aclclouds.com'
 PROJECTS_URL = f'{BASE_URL}/dashboard/projects'
 
-# 多语言关键词
 EXPIRE_LABELS = ('Expire dans', 'Expires in', 'Expire le', 'Expires on', '到期', '过期')
 SUCCESS_KEYWORDS = ('successfully', 'avec succès', 'réussi', 'succès', '成功')
 
@@ -80,13 +79,11 @@ def safe_click_element(sb, element, label):
             element,
         )
         sb.sleep(0.5)
-
         try:
             element.click()
             return True
         except (ElementClickInterceptedException, WebDriverException, StaleElementReferenceException) as e:
             print(f"{label} 普通点击失败，改用 JavaScript 点击: {e}")
-
         sb.driver.execute_script('arguments[0].click();', element)
         sb.sleep(0.5)
         return True
@@ -273,23 +270,65 @@ def find_card_container_from_child(sb, child):
     )
 
 
-# ★★★ 修改点 1：新增表格行回退逻辑 ★★★
+# ==================== 修改点 1：find_project_cards ====================
+
 def find_project_cards(sb):
     cards = []
 
-    # ===== 原有逻辑：Manage 按钮 =====
+    # ★★★ 优先：卡片视图（基于 "Nom personnalisé"） ★★★
     try:
-        manage_btns = find_manage_buttons(sb.driver)
-    except Exception:
-        manage_btns = []
+        card_els = sb.driver.execute_script('''
+            const result = [];
+            const seen = new Set();
 
-    for btn in manage_btns:
+            const nameSpans = [];
+            document.querySelectorAll('span').forEach(s => {
+                const t = (s.textContent || '');
+                if (/Nom personnalisé|Custom name|自定义名称/i.test(t) && t.length < 300) {
+                    nameSpans.push(s);
+                }
+            });
+
+            for (const s of nameSpans) {
+                let cur = s.parentElement;
+                let cardEl = null;
+                for (let i = 0; i < 20 && cur; i++, cur = cur.parentElement) {
+                    const tt = cur.innerText || '';
+                    if (tt.length > 2000) break;
+                    const cnt = (tt.match(/Nom personnalisé/g) || []).length;
+                    if (cnt > 1) break;
+                    if (/Expire dans|Expires in|Expire le|Expires on/i.test(tt)) {
+                        cardEl = cur;
+                    }
+                }
+                if (!cardEl) continue;
+                const sig = (cardEl.innerText || '').slice(0, 300);
+                if (seen.has(sig)) continue;
+                seen.add(sig);
+                result.push(cardEl);
+            }
+            return result;
+        ''')
+        if card_els:
+            print(f"✅ 卡片视图解析到 {len(card_els)} 个项目")
+            for ce in card_els:
+                cards.append(ce)
+    except Exception as e:
+        print(f"卡片视图解析失败: {e}")
+
+    # ===== 原有逻辑：Manage 按钮 =====
+    if not cards:
         try:
-            card = find_card_container_from_child(sb, btn)
-            if card is not None:
-                cards.append(card)
+            manage_btns = find_manage_buttons(sb.driver)
         except Exception:
-            continue
+            manage_btns = []
+        for btn in manage_btns:
+            try:
+                card = find_card_container_from_child(sb, btn)
+                if card is not None:
+                    cards.append(card)
+            except Exception:
+                continue
 
     # ===== 原有逻辑：续期按钮 =====
     if not cards:
@@ -327,58 +366,11 @@ def find_project_cards(sb):
             except Exception:
                 continue
 
-    # ===== ★ 新增：div-based 表格行回退 =====
+    # ===== 兜底：div-based 表格行 =====
     if not cards:
         try:
             rows = sb.driver.execute_script('''
                 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-
-                // 全局建立 uuid -> 项目名 映射
-                const detailNameMap = {};
-
-                // 1) aria-controls="service-details-{uuid}"
-                document.querySelectorAll('[aria-controls^="service-details-"]').forEach(btn => {
-                    const uuid = (btn.getAttribute('aria-controls') || '').replace('service-details-', '').toLowerCase();
-                    const label = btn.getAttribute('aria-label') || '';
-                    const m = label.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i);
-                    if (m && uuid) detailNameMap[uuid] = m[1].trim();
-                });
-
-                // 2) aria-label="Details : ..."
-                document.querySelectorAll('[aria-label^="Details"], [aria-label^="Détails"], [aria-label^="详情"]').forEach(btn => {
-                    const label = btn.getAttribute('aria-label') || '';
-                    const m = label.match(/^(?:Details|Détails|详情)\\s*[:：]\\s*(.+)$/i);
-                    if (!m) return;
-                    const name = m[1].trim();
-                    let cur = btn;
-                    for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
-                        const txt = cur.innerText || '';
-                        const um = txt.match(UUID_RE);
-                        if (um) {
-                            const uuid = um[0].toLowerCase();
-                            if (!detailNameMap[uuid]) detailNameMap[uuid] = name;
-                            break;
-                        }
-                    }
-                });
-
-                // 3) h3/h4 标题 + UUID 祖先
-                document.querySelectorAll('h3, h4').forEach(h => {
-                    const name = (h.textContent || '').trim();
-                    if (!name) return;
-                    let cur = h;
-                    for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
-                        const txt = cur.innerText || '';
-                        const um = txt.match(UUID_RE);
-                        if (um) {
-                            const uuid = um[0].toLowerCase();
-                            if (!detailNameMap[uuid]) detailNameMap[uuid] = name;
-                            break;
-                        }
-                    }
-                });
-
-                // 找所有含 UUID 的叶子节点
                 const leaves = [];
                 document.querySelectorAll('*').forEach(el => {
                     if (el.children.length === 0) {
@@ -387,16 +379,15 @@ def find_project_cards(sb):
                     }
                 });
 
-                // 对每个 UUID，向上找行容器
                 const seen = new Set();
                 const rows = [];
                 for (const n of leaves) {
                     let cur = n;
                     let row = null;
-                    for (let i = 0; i < 12 && cur; i++, cur = cur.parentElement) {
+                    for (let i = 0; i < 15 && cur; i++, cur = cur.parentElement) {
                         if (!cur.parentElement) break;
                         const text = (cur.innerText || '').trim();
-                        if (text.length > 600) continue;
+                        if (text.length > 800) continue;
                         if (/\\d/.test(text) && text.split('\\n').filter(s => s.trim()).length >= 3) {
                             row = cur;
                             break;
@@ -408,8 +399,6 @@ def find_project_cards(sb):
                     const uuid = um[0].toLowerCase();
                     if (seen.has(uuid)) continue;
                     seen.add(uuid);
-                    // 把项目名写到属性上，供 Python 侧读取
-                    row.setAttribute('data-acl-project-name', detailNameMap[uuid] || '');
                     rows.push(row);
                 }
                 return rows;
@@ -421,6 +410,58 @@ def find_project_cards(sb):
 
     return dedupe_project_cards(cards)
 
+
+# ==================== 修改点 2：get_project_name ====================
+
+def get_project_name(card, idx):
+    # ★ 优先：直接 XPath 找 "Nom personnalisé : <strong>X</strong>"
+    try:
+        for strong in card.find_elements(
+            By.XPATH,
+            './/span[contains(., "personnalis") or '
+            'contains(., "Custom name") or '
+            'contains(., "自定义名称")]/strong'
+        ):
+            text = element_text(strong)
+            if text and len(text) <= 80:
+                return text
+    except Exception:
+        pass
+
+    # 原有逻辑：CSS 选择器
+    selectors = [
+        '.projects-card-title',
+        'h1', 'h2', 'h3', 'h4',
+        '[class*="title"]',
+        '[class*="name"]',
+    ]
+    for selector in selectors:
+        try:
+            for elem in card.find_elements(By.CSS_SELECTOR, selector):
+                text = element_text(elem)
+                if text and len(text) <= 80 \
+                        and not re.search(r'renew|renouvel|expiry|expire', text, re.I) \
+                        and not extract_duration_like(text):
+                    return text
+        except Exception:
+            continue
+
+    # 原有逻辑：文本逐行扫描
+    for line in element_text(card).splitlines():
+        line = line.strip()
+        if line and len(line) <= 80 \
+                and not extract_duration_like(line) \
+                and not re.search(
+                    r'renew|renouvel|réactiv|reactivat|suspended|suspendu|expiry|expire|'
+                    r'expire dans|expires in|valid|manage|gérer|gerer|'
+                    r'续期|重新激活|恢复|暂停|过期|到期|管理',
+                    line, re.I
+                ):
+            return line
+    return f"项目 #{idx}"
+
+
+# ==================== 以下全部保持原样 ====================
 
 def extract_date_like(text):
     if not text:
@@ -459,49 +500,6 @@ def extract_duration_like(text):
         return match.group(0).strip()
 
     return ''
-
-
-# ★★★ 修改点 2：优先读取 data-acl-project-name ★★★
-def get_project_name(card, idx):
-    # 优先读 JS 侧写入的项目名
-    try:
-        name = (card.get_attribute('data-acl-project-name') or '').strip()
-        if name:
-            return name
-    except Exception:
-        pass
-
-    # 原有逻辑：CSS 选择器
-    selectors = [
-        '.projects-card-title',
-        'h1', 'h2', 'h3', 'h4',
-        '[class*="title"]',
-        '[class*="name"]',
-    ]
-    for selector in selectors:
-        try:
-            for elem in card.find_elements(By.CSS_SELECTOR, selector):
-                text = element_text(elem)
-                if text and len(text) <= 80 \
-                        and not re.search(r'renew|renouvel|expiry|expire', text, re.I) \
-                        and not extract_duration_like(text):
-                    return text
-        except Exception:
-            continue
-
-    # 原有逻辑：文本逐行扫描
-    for line in element_text(card).splitlines():
-        line = line.strip()
-        if line and len(line) <= 80 \
-                and not extract_duration_like(line) \
-                and not re.search(
-                    r'renew|renouvel|réactiv|reactivat|suspended|suspendu|expiry|expire|'
-                    r'expire dans|expires in|valid|manage|gérer|gerer|'
-                    r'续期|重新激活|恢复|暂停|过期|到期|管理',
-                    line, re.I
-                ):
-            return line
-    return f"项目 #{idx}"
 
 
 def get_project_expiry(card):
@@ -1122,7 +1120,7 @@ def main():
         except Exception as e:
             print(f"获取出口IP失败: {e}")
 
-        sb.set_window_size(1366, 768)
+        sb.set_window_size(1920, 1080)
 
         print(f"打开项目页: {PROJECTS_URL}")
         sb.open(PROJECTS_URL)
@@ -1160,14 +1158,15 @@ def main():
             sb.wait_for_ready_state_complete()
             time.sleep(3)
 
-        # 等待表格渲染（等出现 UUID 格式文本）
+        # 等待页面渲染（等出现 "Expire dans" 或 UUID）
         print("等待项目列表渲染...")
         start = time.time()
         while time.time() - start < 20:
             try:
                 found = sb.driver.execute_script('''
+                    const bodyText = document.body.innerText || '';
                     const re = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-                    return re.test(document.body.innerText || '');
+                    return re.test(bodyText) || /Expire dans|Nom personnalisé/.test(bodyText);
                 ''')
                 if found:
                     break
@@ -1241,7 +1240,6 @@ def main():
 
                 manage_btn = find_manage_buttons(card)
                 if not manage_btn:
-                    # ★★★ 修改点 3：从卡片文本直接读过期时间，而不是硬编码 '未知' ★★★
                     expiry = get_project_expiry(card)
                     print(f"[{project_name}] 无 Manage 按钮，从卡片读取过期时间: {expiry}")
                     send_telegram(build_not_yet_due_message(project_name, expiry))
