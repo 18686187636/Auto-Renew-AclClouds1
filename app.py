@@ -28,9 +28,9 @@ _UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ"
 _LOWER = "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"
 
 # ★ 全局缓存
-_NAME_CACHE = {}          # UUID -> 项目名
-_RENEWAL_NOTE_CACHE = {}  # UUID -> 续期提示文本
-_EXPIRY_CACHE = {}        # UUID -> 过期时间（duration 优先）
+_NAME_CACHE = {}
+_RENEWAL_NOTE_CACHE = {}
+_EXPIRY_CACHE = {}
 
 
 def beijing_time_str():
@@ -56,8 +56,7 @@ def send_telegram(message):
 def wait_for_url_change(sb, original_url, timeout=30):
     start_time = time.time()
     while time.time() - start_time < timeout:
-        current_url = sb.get_current_url()
-        if current_url != original_url:
+        if sb.get_current_url() != original_url:
             return True
         sb.sleep(0.5)
     raise Exception(f"等待 URL 变化超时 ({timeout}秒)，当前仍为: {original_url}")
@@ -280,7 +279,6 @@ def find_card_container_from_child(sb, child):
 def find_project_cards(sb):
     cards = []
 
-    # ===== 原有逻辑：Manage 按钮 =====
     try:
         manage_btns = find_manage_buttons(sb.driver)
     except Exception:
@@ -294,7 +292,6 @@ def find_project_cards(sb):
         except Exception:
             continue
 
-    # ===== 原有逻辑：续期按钮 =====
     if not cards:
         try:
             for button in find_renew_buttons(sb.driver):
@@ -307,7 +304,6 @@ def find_project_cards(sb):
         except Exception:
             pass
 
-    # ===== 原有逻辑：Expire 标签 =====
     if not cards:
         anchor_xpath = (
             '//*[self::div or self::span or self::p or self::label or self::small or self::strong or self::td]'
@@ -380,7 +376,6 @@ def find_project_cards(sb):
             except Exception:
                 uuid = ''
 
-            # 缓存命中：跳过点击
             if uuid and uuid in _NAME_CACHE and uuid in _RENEWAL_NOTE_CACHE and uuid in _EXPIRY_CACHE:
                 print(f"  ✅ 从缓存读取: {_NAME_CACHE[uuid]} (uuid={uuid[:8]})")
                 cards.append(row)
@@ -415,7 +410,31 @@ def find_project_cards(sb):
                 try:
                     safe_click_element(sb, chosen, "Actif 展开")
                     print("  ✅ 已点击 Actif 展开")
-                    sb.sleep(2.5)
+
+                    # ★★★ 智能等待：轮询等 Nom personnalisé 出现 ★★★
+                    got_name = False
+                    for _wait in range(12):  # 最多 6 秒
+                        try:
+                            got_name = sb.driver.execute_script('''
+                                let found = false;
+                                document.querySelectorAll('span').forEach(s => {
+                                    if (/personnalis|Custom name|自定义名称/i.test(s.textContent || '')) {
+                                        const strong = s.querySelector('strong');
+                                        if (strong && strong.textContent.trim()) found = true;
+                                    }
+                                });
+                                return found;
+                            ''')
+                        except Exception:
+                            got_name = False
+                        if got_name:
+                            break
+                        sb.sleep(0.5)
+                    if got_name:
+                        print(f"  ⏳ 等待 Nom personnalisé 出现: 成功")
+                    else:
+                        print(f"  ⏳ 等待 Nom personnalisé 出现: 超时")
+                    sb.sleep(0.5)
                 except Exception as e:
                     print(f"  点击 Actif 失败: {e}")
             else:
@@ -457,7 +476,7 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取 Nom personnalisé 失败: {e}")
 
-            # 3) ★ 读过期时间（优先 duration）★
+            # 3) 读过期时间（优先 duration）
             expiry = ''
             try:
                 expiry = sb.driver.execute_script('''
@@ -472,7 +491,6 @@ def find_project_cards(sb):
                             }
                         }
                     });
-                    // 优先 duration（含 j/h/d 单位）
                     for (const r of results) {
                         if (/\\d+\\s*(?:j|h|jours?|heures?|days?|hours?|d|天|小时)\\b/i.test(r)) return r;
                     }
@@ -499,7 +517,6 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取续期提示失败: {e}")
 
-            # 智能兜底
             if not renewal_note:
                 if expiry:
                     m_days = re.match(r'(\d+)\s*j', expiry)
@@ -536,7 +553,6 @@ def find_project_cards(sb):
 
             cards.append(row)
 
-    # ===== 兜底诊断 =====
     if not cards:
         try:
             mon_dump = sb.driver.execute_script('''
@@ -673,7 +689,6 @@ def get_project_name(card, idx):
 
 
 def get_project_expiry(card):
-    # ★★★ 优先：从缓存（duration 优先）★★★
     try:
         uuid = (card.get_attribute('data-acl-uuid') or '').lower()
         if uuid and uuid in _EXPIRY_CACHE:
@@ -692,7 +707,6 @@ def get_project_expiry(card):
     except Exception:
         pass
 
-    # 原有逻辑：Expire 标签
     for label in EXPIRE_LABELS:
         try:
             labels = card.find_elements(
@@ -710,7 +724,6 @@ def get_project_expiry(card):
         except Exception:
             continue
 
-    # ★ 次级优先：从卡片文本里找 duration（"3j 17h"）
     card_text = element_text(card)
     dur = extract_duration_like(card_text)
     if dur:
@@ -1382,6 +1395,7 @@ def main():
             except Exception as e:
                 print(f"收集卡片 {idx} 信息出错: {e}")
 
+        # ---- 处理有续期按钮的卡片 ----
         for info in cards_info:
             if not info['has_renew']:
                 continue
@@ -1390,7 +1404,8 @@ def main():
                 if info['idx'] - 1 >= len(cards):
                     continue
                 card = cards[info['idx'] - 1]
-                project_name = info['name']
+                # ★ 实时刷新名字
+                project_name = get_project_name(card, info['idx'])
                 old_expiry = get_project_expiry(card)
 
                 renew_btn = find_renew_buttons(card)
@@ -1411,15 +1426,17 @@ def main():
                 print(f"处理续期卡片 {info['idx']} 出错: {e}")
                 send_telegram(f"🇫🇷 Aclclouds 续期通知\n\n⚠️ 处理出错: {str(e)}")
 
+        # ---- 处理无续期按钮的卡片 ----
         for info in cards_info:
             if info['has_renew']:
                 continue
-            project_name = info['name']
             try:
                 cards = find_project_cards(sb)
                 if info['idx'] - 1 >= len(cards):
                     continue
                 card = cards[info['idx'] - 1]
+                # ★ 实时刷新名字
+                project_name = get_project_name(card, info['idx'])
 
                 manage_btn = find_manage_buttons(card)
                 if not manage_btn:
@@ -1444,7 +1461,7 @@ def main():
                 sb.wait_for_ready_state_complete()
                 sb.sleep(2)
             except Exception as e:
-                print(f"处理卡片 {project_name} 出错: {e}")
+                print(f"处理卡片 {info['idx']} 出错: {e}")
                 send_telegram(f"🇫🇷 Aclclouds 续期通知\n\n⚠️ 处理出错: {str(e)}")
 
         print("所有项目处理完成。")
