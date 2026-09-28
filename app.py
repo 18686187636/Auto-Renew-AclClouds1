@@ -125,6 +125,18 @@ def element_contains(parent, child):
         return False
 
 
+def should_try_renew(expiry_str):
+    if not expiry_str:
+        return False
+    m = re.match(r'(\d+)\s*(?:j|d|jour|jours|天|日)\b', expiry_str, re.I)
+    if m:
+        return int(m.group(1)) <= 2
+    m = re.match(r'(\d+)\s*(?:h|heure|heures|hour|hours|小时)', expiry_str, re.I)
+    if m:
+        return int(m.group(1)) <= 48
+    return False
+
+
 def dedupe_project_cards(cards):
     cards = unique_elements(cards)
     if not cards:
@@ -326,7 +338,7 @@ def dump_visible_buttons(sb, context='展开区'):
             return out;
         ''')
         print(f"  🔎 [{context}] 可见按钮/链接 ({len(info)} 个):")
-        for i, b in enumerate(info[:40], 1):
+        for i, b in enumerate(info[:60], 1):
             print(f"      #{i} <{b['tag']}> text='{b['text']}' aria='{b['aria']}' title='{b['title']}' cls='{b['cls']}'")
     except Exception as e:
         print(f"  dump 可见按钮失败: {e}")
@@ -359,12 +371,16 @@ def find_card_container_from_child(sb, child):
     )
 
 
+# ==================== find_project_cards（核心修复） ====================
+
 def find_project_cards(sb):
     """
     ★ 修复版：在 renewals 视图下跳过 Actif 点击，直接找续期按钮。
     """
     cards = []
     is_renewals_view = 'view=renewals' in sb.get_current_url()
+    if is_renewals_view:
+        print("📍 检测到续期视图 (view=renewals)，跳过 Actif 点击，直接查找续期按钮...")
 
     # ===== 1. 尝试通过 manage/renew 按钮定位行容器 =====
     try:
@@ -498,7 +514,6 @@ def find_project_cards(sb):
                     try:
                         safe_click_element(sb, chosen, "Actif 展开")
                         print("  ✅ 已点击 Actif 展开")
-                        # 等待渲染
                         for _wait in range(30):
                             try:
                                 state = sb.driver.execute_script('''
@@ -559,7 +574,6 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取 Nom personnalisé 失败: {e}")
 
-            # ★ 兜底：从行文本中提取项目名（取第一行短文本）
             if not name:
                 try:
                     row_text = (row.text or '').strip()
@@ -599,7 +613,6 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取过期时间失败: {e}")
 
-            # 兜底：从行文本提取 duration
             if not expiry:
                 try:
                     row_text = (row.text or '').strip()
@@ -664,6 +677,8 @@ def find_project_cards(sb):
 
     return dedupe_project_cards(cards)
 
+
+# ==================== 其余函数 ====================
 
 def extract_date_like(text):
     if not text:
@@ -898,6 +913,8 @@ def log_projects_page_diagnostics(sb):
     print(f"项目页可见文本摘要: {body_text[:1200]}")
 
 
+# ==================== 登录相关（保持不变） ====================
+
 def click_captcha_checkbox(sb, label='验证码', timeout=10):
     selectors = [
         'div.auth-captcha-inner[role="checkbox"]',
@@ -1063,78 +1080,6 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
     return False
 
 
-def mask_email(email):
-    if not email or '@' not in email:
-        return email or ''
-    local, domain = email.split('@', 1)
-    if len(local) <= 2:
-        masked_local = local[0] + '****' if local else '****'
-    elif len(local) <= 4:
-        masked_local = f"{local[0]}****{local[-1]}"
-    else:
-        masked_local = f"{local[:2]}****{local[-2:]}"
-    return f"{masked_local}@{domain}"
-
-
-def build_success_message(project_name, old_expiry, new_expiry):
-    return "\n".join([
-        "🇫🇷 Aclclouds 续期通知", "",
-        "✅ 续期成功",
-        f"📦 项目: {project_name}",
-        f"⏱️ 旧过期: {old_expiry}",
-        f"⏱️ 新过期: {new_expiry}",
-        f"👤 登录账户: {mask_email(EMAIL)}",
-        f"⏱️ 运行时间: {beijing_time_str()}",
-    ])
-
-
-def build_not_yet_due_message(project_name, expiry, note=''):
-    lines = [
-        "🇫🇷 Aclclouds 续期通知", "",
-        "⏳ 未到续期时间",
-        f"📦 项目: {project_name}",
-        f"⏱️ 当前过期时间: {expiry}",
-    ]
-    if note:
-        lines.append(f"📅 可续期提示: {note}")
-    lines.extend([
-        f"👤 登录账户: {mask_email(EMAIL)}",
-        f"⏱️ 运行时间: {beijing_time_str()}",
-    ])
-    return "\n".join(lines)
-
-
-def build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note):
-    lines = [
-        "🇫🇷 Aclclouds 续期通知", "",
-        f"❌ 续期状态未确认: {project_name}",
-        f"👤 登录账户: {mask_email(EMAIL)}",
-    ]
-    if old_expiry and old_expiry.lower() not in ['suspended', 'paused', 'suspendu', 'en pause', '暂停']:
-        lines.append(f"旧过期: {old_expiry}")
-    lines.extend([
-        f"当前过期: {new_expiry}",
-        f"页面提示: {result_note or '未发现成功提示'}",
-    ])
-    return "\n".join(lines)
-
-
-def handle_renew_antibot(sb, project_name):
-    for selector in [
-        '//div[contains(., "Anti-bot confirmation")]',
-        '//div[contains(., "Confirm you are human")]',
-        '//div[contains(., "I am not a robot")]',
-    ]:
-        try:
-            sb.wait_for_element_visible(selector, timeout=5)
-            print(f"[{project_name}] 检测到续期人机验证窗口")
-            return click_captcha_checkbox(sb, '续期人机验证', timeout=5)
-        except Exception:
-            continue
-    print(f"[{project_name}] 未检测到续期人机验证窗口")
-    return False
-
-
 def js_set_input_value(sb, selector, value):
     sb.execute_script(
         '''
@@ -1222,12 +1167,88 @@ def get_current_ip(proxy_server: str = "") -> str:
     return response.text.strip()
 
 
+# ==================== 通知消息 ====================
+
+def mask_email(email):
+    if not email or '@' not in email:
+        return email or ''
+    local, domain = email.split('@', 1)
+    if len(local) <= 2:
+        masked_local = local[0] + '****' if local else '****'
+    elif len(local) <= 4:
+        masked_local = f"{local[0]}****{local[-1]}"
+    else:
+        masked_local = f"{local[:2]}****{local[-2:]}"
+    return f"{masked_local}@{domain}"
+
+
+def build_success_message(project_name, old_expiry, new_expiry):
+    return "\n".join([
+        "🇫🇷 Aclclouds 续期通知", "",
+        "✅ 续期成功",
+        f"📦 项目: {project_name}",
+        f"⏱️ 旧过期: {old_expiry}",
+        f"⏱️ 新过期: {new_expiry}",
+        f"👤 登录账户: {mask_email(EMAIL)}",
+        f"⏱️ 运行时间: {beijing_time_str()}",
+    ])
+
+
+def build_not_yet_due_message(project_name, expiry, note=''):
+    lines = [
+        "🇫🇷 Aclclouds 续期通知", "",
+        "⏳ 未到续期时间",
+        f"📦 项目: {project_name}",
+        f"⏱️ 当前过期时间: {expiry}",
+    ]
+    if note:
+        lines.append(f"📅 可续期提示: {note}")
+    lines.extend([
+        f"👤 登录账户: {mask_email(EMAIL)}",
+        f"⏱️ 运行时间: {beijing_time_str()}",
+    ])
+    return "\n".join(lines)
+
+
+def build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note):
+    lines = [
+        "🇫🇷 Aclclouds 续期通知", "",
+        f"❌ 续期状态未确认: {project_name}",
+        f"👤 登录账户: {mask_email(EMAIL)}",
+    ]
+    if old_expiry and old_expiry.lower() not in ['suspended', 'paused', 'suspendu', 'en pause', '暂停']:
+        lines.append(f"旧过期: {old_expiry}")
+    lines.extend([
+        f"当前过期: {new_expiry}",
+        f"页面提示: {result_note or '未发现成功提示'}",
+    ])
+    return "\n".join(lines)
+
+
+def handle_renew_antibot(sb, project_name):
+    for selector in [
+        '//div[contains(., "Anti-bot confirmation")]',
+        '//div[contains(., "Confirm you are human")]',
+        '//div[contains(., "I am not a robot")]',
+    ]:
+        try:
+            sb.wait_for_element_visible(selector, timeout=5)
+            print(f"[{project_name}] 检测到续期人机验证窗口")
+            return click_captcha_checkbox(sb, '续期人机验证', timeout=5)
+        except Exception:
+            continue
+    print(f"[{project_name}] 未检测到续期人机验证窗口")
+    return False
+
+
+# ==================== 主流程 ====================
+
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     PROXY_SERVER = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or "socks5://127.0.0.1:1080"
     if PROXY_SERVER.startswith("socks://"):
         PROXY_SERVER = PROXY_SERVER.replace("socks://", "socks5h://", 1)
-    HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
+    HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
     sb_options = {'uc': True, 'headless': HEADLESS}
     if IS_PROXY:
         sb_options['proxy'] = PROXY_SERVER
@@ -1244,7 +1265,7 @@ def main():
 
         sb.set_window_size(1920, 1080)
 
-        # ★ 直接打开续期视图
+        # 打开续期视图
         print(f"打开续期视图: {RENEWALS_URL}")
         sb.open(RENEWALS_URL)
         sb.wait_for_ready_state_complete()
@@ -1292,7 +1313,6 @@ def main():
             sb.sleep(0.5)
         sb.sleep(1)
 
-        # ★ 续期视图上直接 dump 一下按钮，方便看
         dump_visible_buttons(sb, '续期视图加载后')
 
         cards = find_project_cards(sb)
@@ -1328,7 +1348,6 @@ def main():
                     uuid = ''
 
                 has_renew_cached = _HAS_RENEW_CACHE.get(uuid, False)
-                # ★ 续期视图上直接尝试续期（按钮本来就应该有）
                 should_renew = info['has_renew'] or has_renew_cached or True
 
                 if should_renew:
@@ -1347,7 +1366,6 @@ def main():
                         handle_renew_antibot(sb, project_name)
                         sb.sleep(4)
 
-                        # 重新读一遍
                         try:
                             cards_after = find_project_cards(sb)
                             new_expiry = expiry
