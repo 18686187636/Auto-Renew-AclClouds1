@@ -125,18 +125,6 @@ def element_contains(parent, child):
         return False
 
 
-def should_try_renew(expiry_str):
-    if not expiry_str:
-        return False
-    m = re.match(r'(\d+)\s*(?:j|d|jour|jours|天|日)\b', expiry_str, re.I)
-    if m:
-        return int(m.group(1)) <= 2
-    m = re.match(r'(\d+)\s*(?:h|heure|heures|hour|hours|小时)', expiry_str, re.I)
-    if m:
-        return int(m.group(1)) <= 48
-    return False
-
-
 def dedupe_project_cards(cards):
     cards = unique_elements(cards)
     if not cards:
@@ -242,7 +230,7 @@ def find_renew_buttons(root):
 
 
 def find_renew_buttons_global(sb):
-    """★ 全局搜续期按钮，优先用 .client-btn__content + Renouveler"""
+    """全局搜续期按钮，优先用 .client-btn__content + Renouveler"""
     found = []
 
     # 1) 优先：找所有 .client-btn__content 文本含 Renouveler / Renew / 续期的
@@ -255,7 +243,6 @@ def find_renew_buttons_global(sb):
                     continue
                 if not re.search(r'renouvel|renew|续期|续订|延长|prolonger|reactivat|réactiv', text, re.I):
                     continue
-                # 向上找 button/a/role=button
                 target = None
                 cur = span
                 for _ in range(5):
@@ -373,8 +360,13 @@ def find_card_container_from_child(sb, child):
 
 
 def find_project_cards(sb):
+    """
+    ★ 修复版：在 renewals 视图下跳过 Actif 点击，直接找续期按钮。
+    """
     cards = []
+    is_renewals_view = 'view=renewals' in sb.get_current_url()
 
+    # ===== 1. 尝试通过 manage/renew 按钮定位行容器 =====
     try:
         manage_btns = find_manage_buttons(sb.driver)
     except Exception:
@@ -421,6 +413,7 @@ def find_project_cards(sb):
             except Exception:
                 continue
 
+    # ===== 2. 兜底：通过 UUID 解析表格行 =====
     if not cards:
         try:
             rows = sb.driver.execute_script('''
@@ -475,91 +468,78 @@ def find_project_cards(sb):
                 cards.append(row)
                 continue
 
-            status_els = []
-            try:
-                status_els = row.find_elements(
-                    By.XPATH,
-                    './/*[self::span or self::button or self::div or self::a]'
-                    '[normalize-space(.) = "Actif" '
-                    'or normalize-space(.) = "Active" '
-                    'or normalize-space(.) = "Activé" '
-                    'or normalize-space(.) = "Activated" '
-                    'or normalize-space(.) = "活跃" '
-                    'or normalize-space(.) = "正常"]'
-                )
-            except Exception:
+            # ★ 关键修复：如果是 renewals 视图，跳过 Actif 点击
+            if not is_renewals_view:
                 status_els = []
-
-            chosen = None
-            for el in status_els:
                 try:
-                    if el.is_displayed() and el.is_enabled():
-                        chosen = el
-                        break
-                except Exception:
-                    continue
-
-            if chosen is not None:
-                try:
-                    safe_click_element(sb, chosen, "Actif 展开")
-                    print("  ✅ 已点击 Actif 展开")
-
-                    # ★ 同时等 Nom personnalisé 和 Renouveler 出现
-                    got_all = False
-                    for _wait in range(30):  # 15 秒
-                        try:
-                            state = sb.driver.execute_script('''
-                                let hasName = false;
-                                document.querySelectorAll('span').forEach(s => {
-                                    if (/personnalis|Custom name|自定义名称/i.test(s.textContent || '')) {
-                                        const strong = s.querySelector('strong');
-                                        if (strong && strong.textContent.trim()) hasName = true;
-                                    }
-                                });
-                                let hasRenew = false;
-                                document.querySelectorAll('.client-btn__content, button, a').forEach(el => {
-                                    const t = (el.textContent || '').trim();
-                                    if (/renouvel|renew|续期|续订|延长/i.test(t)) {
-                                        if (el.offsetParent) hasRenew = true;
-                                    }
-                                });
-                                return {name: hasName, renew: hasRenew};
-                            ''')
-                            if state.get('name') and state.get('renew'):
-                                got_all = True
-                                break
-                            if state.get('name') and _wait >= 10:
-                                # 名字出现了但按钮还没，等 5 秒就够
-                                got_all = True
-                                break
-                        except Exception:
-                            pass
-                        sb.sleep(0.5)
-                    print(f"  ⏳ 等待渲染: {'成功' if got_all else '超时'}")
-                    sb.sleep(0.5)
-                    dump_visible_buttons(sb, 'Actif 展开后')
-                except Exception as e:
-                    print(f"  点击 Actif 失败: {e}")
-            else:
-                btns = []
-                try:
-                    btns = row.find_elements(
+                    status_els = row.find_elements(
                         By.XPATH,
-                        './/*[@aria-controls and starts-with(@aria-controls, "service-details-")] | '
-                        './/button[contains(@aria-label, "Details")] | '
-                        './/*[starts-with(@aria-label, "Details : ")]'
+                        './/*[self::span or self::button or self::div or self::a]'
+                        '[normalize-space(.) = "Actif" '
+                        'or normalize-space(.) = "Active" '
+                        'or normalize-space(.) = "Activé" '
+                        'or normalize-space(.) = "Activated" '
+                        'or normalize-space(.) = "活跃" '
+                        'or normalize-space(.) = "正常"]'
                     )
                 except Exception:
-                    btns = []
-                if btns:
-                    try:
-                        safe_click_element(sb, btns[0], "Details 展开")
-                        print("  ✅ 已点击 Details 展开")
-                        sb.sleep(2.5)
-                        dump_visible_buttons(sb, 'Details 展开后')
-                    except Exception as e:
-                        print(f"  点击 Details 失败: {e}")
+                    status_els = []
 
+                chosen = None
+                for el in status_els:
+                    try:
+                        if el.is_displayed() and el.is_enabled():
+                            chosen = el
+                            break
+                    except Exception:
+                        continue
+
+                if chosen is not None:
+                    try:
+                        safe_click_element(sb, chosen, "Actif 展开")
+                        print("  ✅ 已点击 Actif 展开")
+                        # 等待渲染
+                        for _wait in range(30):
+                            try:
+                                state = sb.driver.execute_script('''
+                                    let hasName = false;
+                                    document.querySelectorAll('span').forEach(s => {
+                                        if (/personnalis|Custom name|自定义名称/i.test(s.textContent || '')) {
+                                            const strong = s.querySelector('strong');
+                                            if (strong && strong.textContent.trim()) hasName = true;
+                                        }
+                                    });
+                                    return {name: hasName};
+                                ''')
+                                if state.get('name'):
+                                    break
+                            except Exception:
+                                pass
+                            sb.sleep(0.5)
+                        dump_visible_buttons(sb, 'Actif 展开后')
+                    except Exception as e:
+                        print(f"  点击 Actif 失败: {e}")
+                else:
+                    btns = []
+                    try:
+                        btns = row.find_elements(
+                            By.XPATH,
+                            './/*[@aria-controls and starts-with(@aria-controls, "service-details-")] | '
+                            './/button[contains(@aria-label, "Details")] | '
+                            './/*[starts-with(@aria-label, "Details : ")]'
+                        )
+                    except Exception:
+                        btns = []
+                    if btns:
+                        try:
+                            safe_click_element(sb, btns[0], "Details 展开")
+                            print("  ✅ 已点击 Details 展开")
+                            sb.sleep(2.5)
+                            dump_visible_buttons(sb, 'Details 展开后')
+                        except Exception as e:
+                            print(f"  点击 Details 失败: {e}")
+
+            # ===== 读取项目信息 =====
             name = ''
             try:
                 name = sb.driver.execute_script('''
@@ -578,6 +558,24 @@ def find_project_cards(sb):
                 ''') or ''
             except Exception as e:
                 print(f"  读取 Nom personnalisé 失败: {e}")
+
+            # ★ 兜底：从行文本中提取项目名（取第一行短文本）
+            if not name:
+                try:
+                    row_text = (row.text or '').strip()
+                    for line in row_text.splitlines():
+                        line = line.strip()
+                        if line and len(line) <= 80 \
+                                and not re.search(
+                                    r'expire|expiry|renouvel|renew|manage|gérer|gerer|'
+                                    r'续期|重新激活|恢复|暂停|过期|到期|管理|actif|active|'
+                                    r'one-off|auto|renew|status|type',
+                                    line, re.I
+                                ):
+                            name = line
+                            break
+                except Exception:
+                    pass
 
             expiry = ''
             try:
@@ -600,6 +598,16 @@ def find_project_cards(sb):
                 ''') or ''
             except Exception as e:
                 print(f"  读取过期时间失败: {e}")
+
+            # 兜底：从行文本提取 duration
+            if not expiry:
+                try:
+                    row_text = (row.text or '').strip()
+                    m = re.search(r'(\d+\s*(?:j|h|jours?|heures?|days?|hours?|d|天|小时)\b)', row_text, re.I)
+                    if m:
+                        expiry = m.group(0).strip()
+                except Exception:
+                    pass
 
             renewal_note = ''
             try:
@@ -1219,7 +1227,7 @@ def main():
     PROXY_SERVER = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or "socks5://127.0.0.1:1080"
     if PROXY_SERVER.startswith("socks://"):
         PROXY_SERVER = PROXY_SERVER.replace("socks://", "socks5h://", 1)
-    HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
+    HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
     sb_options = {'uc': True, 'headless': HEADLESS}
     if IS_PROXY:
         sb_options['proxy'] = PROXY_SERVER
@@ -1321,7 +1329,7 @@ def main():
 
                 has_renew_cached = _HAS_RENEW_CACHE.get(uuid, False)
                 # ★ 续期视图上直接尝试续期（按钮本来就应该有）
-                should_renew = info['has_renew'] or has_renew_cached or should_try_renew(expiry) or True
+                should_renew = info['has_renew'] or has_renew_cached or True
 
                 if should_renew:
                     renew_btns = find_renew_buttons(card)
