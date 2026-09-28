@@ -31,6 +31,7 @@ _LOWER = "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"
 _NAME_CACHE = {}
 _RENEWAL_NOTE_CACHE = {}
 _EXPIRY_CACHE = {}
+_HAS_RENEW_CACHE = {}   # UUID -> bool（是否检测到续期按钮）
 
 
 def beijing_time_str():
@@ -123,6 +124,21 @@ def element_contains(parent, child):
         return child in parent.find_elements(By.XPATH, './/*')
     except Exception:
         return False
+
+
+# ★ 判断是否该尝试续期（剩余 ≤ 2 天）
+def should_try_renew(expiry_str):
+    if not expiry_str:
+        return False
+    # "1j 1h" / "1d 1h" / "1天1小时" / "1 jour"
+    m = re.match(r'(\d+)\s*(?:j|d|jour|jours|天|日)\b', expiry_str, re.I)
+    if m:
+        return int(m.group(1)) <= 2
+    # "25h" / "25 hours" / "25小时"
+    m = re.match(r'(\d+)\s*(?:h|heure|heures|hour|hours|小时)', expiry_str, re.I)
+    if m:
+        return int(m.group(1)) <= 48
+    return False
 
 
 def dedupe_project_cards(cards):
@@ -232,6 +248,34 @@ def find_renew_buttons(root):
         except Exception:
             continue
     return unique_elements([button for button in buttons if element_text(button) or button.is_displayed()])
+
+
+# ★ 全局搜索续期按钮（用于展开区在 Portal 的情况）
+def find_renew_buttons_global(sb):
+    xpath = (
+        '//button['
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew") or '
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renouvel") or '
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renouveler") or '
+        'contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew") or '
+        'contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renouvel") or '
+        'contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew") or '
+        'contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renouvel")'
+        ']'
+    )
+    try:
+        btns = sb.driver.find_elements(By.XPATH, xpath)
+        return [b for b in btns if b.is_displayed() and b.is_enabled()]
+    except Exception:
+        return []
+
+
+# ★ 检测页面当前是否存在可见的续期按钮（用于缓存 has_renew）
+def has_visible_renew_button(sb):
+    try:
+        return len(find_renew_buttons_global(sb)) > 0
+    except Exception:
+        return False
 
 
 def find_card_container_from_child(sb, child):
@@ -376,6 +420,7 @@ def find_project_cards(sb):
             except Exception:
                 uuid = ''
 
+            # 缓存命中
             if uuid and uuid in _NAME_CACHE and uuid in _RENEWAL_NOTE_CACHE and uuid in _EXPIRY_CACHE:
                 print(f"  ✅ 从缓存读取: {_NAME_CACHE[uuid]} (uuid={uuid[:8]})")
                 cards.append(row)
@@ -411,9 +456,8 @@ def find_project_cards(sb):
                     safe_click_element(sb, chosen, "Actif 展开")
                     print("  ✅ 已点击 Actif 展开")
 
-                    # ★★★ 智能等待：轮询等 Nom personnalisé 出现 ★★★
                     got_name = False
-                    for _wait in range(12):  # 最多 6 秒
+                    for _wait in range(30):  # 15 秒
                         try:
                             got_name = sb.driver.execute_script('''
                                 let found = false;
@@ -430,10 +474,7 @@ def find_project_cards(sb):
                         if got_name:
                             break
                         sb.sleep(0.5)
-                    if got_name:
-                        print(f"  ⏳ 等待 Nom personnalisé 出现: 成功")
-                    else:
-                        print(f"  ⏳ 等待 Nom personnalisé 出现: 超时")
+                    print(f"  ⏳ 等待 Nom personnalisé 出现: {'成功' if got_name else '超时'}")
                     sb.sleep(0.5)
                 except Exception as e:
                     print(f"  点击 Actif 失败: {e}")
@@ -476,7 +517,7 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取 Nom personnalisé 失败: {e}")
 
-            # 3) 读过期时间（优先 duration）
+            # 3) 读过期时间
             expiry = ''
             try:
                 expiry = sb.driver.execute_script('''
@@ -517,6 +558,13 @@ def find_project_cards(sb):
             except Exception as e:
                 print(f"  读取续期提示失败: {e}")
 
+            # ★ 5) 检测当前页面是否有可见的续期按钮
+            has_renew = False
+            try:
+                has_renew = has_visible_renew_button(sb)
+            except Exception:
+                pass
+
             if not renewal_note:
                 if expiry:
                     m_days = re.match(r'(\d+)\s*j', expiry)
@@ -529,7 +577,7 @@ def find_project_cards(sb):
                     else:
                         renewal_note = 'Renewal will be available 2 days before expiration'
 
-            # 5) 写入缓存
+            # 6) 写缓存
             if name:
                 if uuid:
                     _NAME_CACHE[uuid] = name
@@ -551,35 +599,11 @@ def find_project_cards(sb):
             else:
                 print(f"  ⚠️ 未能读到续期提示 (uuid={uuid[:8] or '-'})")
 
-            cards.append(row)
+            if uuid:
+                _HAS_RENEW_CACHE[uuid] = has_renew
+            print(f"  🔄 可见续期按钮: {'是' if has_renew else '否'}")
 
-    if not cards:
-        try:
-            mon_dump = sb.driver.execute_script('''
-                const hits = [];
-                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-                let tn;
-                while (tn = walker.nextNode()) {
-                    const s = (tn.textContent || '').trim();
-                    if (s.includes('Mon VPS') || s.includes('Nom personnalisé') || s.includes('Renewal will be available')) {
-                        let p = tn.parentElement;
-                        if (p) {
-                            const h = (p.outerHTML || '').slice(0, 1500);
-                            if (!hits.includes(h)) hits.push(h);
-                        }
-                    }
-                }
-                return hits.slice(0, 5);
-            ''')
-            if mon_dump:
-                print("=" * 60)
-                print("🔍 找到相关元素：")
-                for i, h in enumerate(mon_dump, 1):
-                    print(f"---- 元素 #{i} ----")
-                    print(h)
-                print("=" * 60)
-        except Exception as e:
-            print(f"诊断失败: {e}")
+            cards.append(row)
 
     return dedupe_project_cards(cards)
 
@@ -829,37 +853,6 @@ def get_card_by_index(sb, idx):
     if 1 <= idx <= len(cards):
         return cards[idx - 1]
     return None
-
-
-def wait_for_renew_result(sb, idx, timeout=30):
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            for kw in SUCCESS_KEYWORDS:
-                success_modals = sb.driver.find_elements(
-                    By.XPATH,
-                    f'//div[contains(@class, "modal") and '
-                    f'contains(translate(., "{_UPPER}", "{_LOWER}"), "{kw.lower()}")]',
-                )
-                if any(modal.is_displayed() for modal in success_modals):
-                    card = get_card_by_index(sb, idx)
-                    return True, get_project_expiry(card) if card else '未知', 'success modal'
-
-            card = get_card_by_index(sb, idx)
-            if card:
-                renewal_note = get_renewal_available_note(card)
-                renew_buttons = find_renew_buttons(card)
-                if renewal_note and not renew_buttons:
-                    return True, get_project_expiry(card), renewal_note
-        except Exception as e:
-            print(f"检查续期结果时暂时失败: {e}")
-
-        sb.sleep(1)
-
-    card = get_card_by_index(sb, idx)
-    note = get_renewal_available_note(card) if card else ''
-    expiry = get_project_expiry(card) if card else '未知'
-    return False, expiry, note
 
 
 def get_action_button_label(button):
@@ -1395,71 +1388,74 @@ def main():
             except Exception as e:
                 print(f"收集卡片 {idx} 信息出错: {e}")
 
-        # ---- 处理有续期按钮的卡片 ----
+        # ===== 处理所有项目 =====
         for info in cards_info:
-            if not info['has_renew']:
-                continue
             try:
                 cards = find_project_cards(sb)
                 if info['idx'] - 1 >= len(cards):
                     continue
                 card = cards[info['idx'] - 1]
-                # ★ 实时刷新名字
                 project_name = get_project_name(card, info['idx'])
-                old_expiry = get_project_expiry(card)
-
-                renew_btn = find_renew_buttons(card)
-                if not renew_btn:
-                    continue
-
-                action_label = get_action_button_label(renew_btn[0])
-                safe_click_element(sb, renew_btn[0], f"[{project_name}] {action_label}按钮")
-                print(f"[{project_name}] 点击 {action_label}...")
-                handle_renew_antibot(sb, project_name)
-                success, new_expiry, result_note = wait_for_renew_result(sb, info['idx'], timeout=30)
-                if success:
-                    print(f"续期成功！状态: {result_note}，新过期: {new_expiry}")
-                    send_telegram(build_success_message(project_name, old_expiry, new_expiry))
-                else:
-                    send_telegram(build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note))
-            except Exception as e:
-                print(f"处理续期卡片 {info['idx']} 出错: {e}")
-                send_telegram(f"🇫🇷 Aclclouds 续期通知\n\n⚠️ 处理出错: {str(e)}")
-
-        # ---- 处理无续期按钮的卡片 ----
-        for info in cards_info:
-            if info['has_renew']:
-                continue
-            try:
-                cards = find_project_cards(sb)
-                if info['idx'] - 1 >= len(cards):
-                    continue
-                card = cards[info['idx'] - 1]
-                # ★ 实时刷新名字
-                project_name = get_project_name(card, info['idx'])
-
-                manage_btn = find_manage_buttons(card)
-                if not manage_btn:
-                    expiry = get_project_expiry(card)
-                    note = get_renewal_available_note(card)
-                    print(f"[{project_name}] 无 Manage 按钮，从卡片读取过期时间: {expiry}，续期提示: {note or '-'}")
-                    send_telegram(build_not_yet_due_message(project_name, expiry, note))
-                    continue
-
-                print(f"[{project_name}] 进入 Manage 详情页读取过期时间...")
-                safe_click_element(sb, manage_btn[0], f"[{project_name}] Manage")
-                sb.wait_for_ready_state_complete()
-                sb.sleep(3)
-
-                old_expiry = read_expiry_from_page(sb)
+                expiry = get_project_expiry(card)
                 note = get_renewal_available_note(card)
-                print(f"[{project_name}] 详情页过期: {old_expiry}，续期提示: {note or '-'}")
+                try:
+                    uuid = (card.get_attribute('data-acl-uuid') or '').lower()
+                except Exception:
+                    uuid = ''
 
-                send_telegram(build_not_yet_due_message(project_name, old_expiry, note))
+                # ★ 判断是否该主动续期
+                has_renew_cached = _HAS_RENEW_CACHE.get(uuid, False)
+                should_renew = info['has_renew'] or has_renew_cached or should_try_renew(expiry)
 
-                sb.open(PROJECTS_URL)
-                sb.wait_for_ready_state_complete()
-                sb.sleep(2)
+                if should_renew:
+                    # 先尝试行内续期按钮
+                    renew_btns = find_renew_buttons(card)
+                    # 没有再全局找
+                    if not renew_btns:
+                        renew_btns = find_renew_buttons_global(sb)
+
+                    if renew_btns:
+                        action_label = get_action_button_label(renew_btns[0])
+                        safe_click_element(sb, renew_btns[0], f"[{project_name}] {action_label}按钮")
+                        print(f"[{project_name}] 点击 {action_label}...")
+                        handle_renew_antibot(sb, project_name)
+
+                        # 等待结果
+                        sb.sleep(3)
+                        # 直接读当前 DOM 判定（旧 vs 新）
+                        new_expiry = expiry
+                        try:
+                            cards_after = find_project_cards(sb)
+                            for c in cards_after:
+                                try:
+                                    if (c.get_attribute('data-acl-uuid') or '').lower() == uuid:
+                                        new_expiry = _EXPIRY_CACHE.get(uuid, new_expiry)
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+
+                        if new_expiry != expiry:
+                            print(f"[{project_name}] 续期成功！{expiry} → {new_expiry}")
+                            send_telegram(build_success_message(project_name, expiry, new_expiry))
+                        else:
+                            # 用 wait_for_renew_result 再兜一次
+                            success, latest_expiry, result_note = wait_for_renew_result(sb, info['idx'], timeout=20)
+                            if success and latest_expiry != expiry:
+                                print(f"[{project_name}] 续期成功！{expiry} → {latest_expiry}")
+                                send_telegram(build_success_message(project_name, expiry, latest_expiry))
+                            else:
+                                print(f"[{project_name}] 续期状态未确认")
+                                send_telegram(build_unconfirmed_message(project_name, expiry, latest_expiry or new_expiry, '按钮已点击'))
+                    else:
+                        print(f"[{project_name}] 未找到可见续期按钮，发出未到续期时间通知")
+                        send_telegram(build_not_yet_due_message(project_name, expiry, note))
+                else:
+                    # 未到时间，发通知
+                    print(f"[{project_name}] 未到续期时间（剩余: {expiry}）")
+                    send_telegram(build_not_yet_due_message(project_name, expiry, note))
+
             except Exception as e:
                 print(f"处理卡片 {info['idx']} 出错: {e}")
                 send_telegram(f"🇫🇷 Aclclouds 续期通知\n\n⚠️ 处理出错: {str(e)}")
