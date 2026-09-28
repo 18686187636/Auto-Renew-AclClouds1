@@ -218,19 +218,11 @@ def find_renew_buttons(root):
         f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "renouvel") or '
         f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "renew") or '
         f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "renouvel")]',
-        f'.//button['
-        f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "reactivate") or '
-        f'contains(translate(@title, "{_UPPER}", "{_LOWER}"), "réactiv") or '
-        f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "reactivate") or '
-        f'contains(translate(@aria-label, "{_UPPER}", "{_LOWER}"), "réactiv")]',
-        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renew")]',
         f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renouvel")]',
-        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "reactivate")]',
-        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "réactiv")]',
+        f'.//button[contains(translate(normalize-space(.), "{_UPPER}", "{_LOWER}"), "renew")]',
         './/button[contains(normalize-space(.), "续期")]',
-        './/button[contains(normalize-space(.), "续订")]',
-        './/button[contains(normalize-space(.), "延长")]',
-        './/span[contains(@class, "client-btn__content") and contains(normalize-space(.), "Renouveler")]',
+        './/a[contains(normalize-space(.), "Renouveler")]',
+        './/button[contains(normalize-space(.), "Renouveler")]',
     ]
     buttons = []
     for selector in selectors:
@@ -238,14 +230,16 @@ def find_renew_buttons(root):
             buttons.extend(find_elements(root, selector))
         except Exception:
             continue
-    return unique_elements([button for button in buttons if element_text(button) or button.is_displayed()])
+    return unique_elements([button for button in buttons if button.is_displayed()])
 
 
 def find_renew_buttons_global(sb):
-    """全局搜续期按钮，优先用 .client-btn__content + Renouveler"""
+    """
+    ★ 精确匹配 Renouveler / Renew 按钮。
+    只找 .client-btn__content 中文本恰好是 Renouveler / Renew / 续期 的。
+    """
     found = []
 
-    # 1) 优先：找所有 .client-btn__content 文本含 Renouveler / Renew / 续期的
     try:
         spans = sb.driver.find_elements(By.CSS_SELECTOR, '.client-btn__content')
         for span in spans:
@@ -253,7 +247,8 @@ def find_renew_buttons_global(sb):
                 text = (span.text or '').strip()
                 if not text:
                     continue
-                if not re.search(r'renouvel|renew|续期|续订|延长|prolonger|reactivat|réactiv', text, re.I):
+                # 精确匹配（整词），避免误匹配 "Details" 等
+                if not re.fullmatch(r'(?:Renouveler|Renew|Renew now|续期|续订|Prolonger|延长)', text, re.I):
                     continue
                 target = None
                 cur = span
@@ -275,41 +270,14 @@ def find_renew_buttons_global(sb):
                         if cur.is_displayed() and cur.is_enabled():
                             target = cur
                             break
-                if target is None:
-                    if span.is_displayed():
-                        target = span
+                if target is None and span.is_displayed():
+                    target = span
                 if target is not None:
                     found.append(target)
             except Exception:
                 continue
     except Exception:
         pass
-
-    # 2) 兜底：普通 XPath 关键词搜索
-    if not found:
-        keywords = ('renew', 'renouvel', 'renouveler', 'renouvellement', 'prolonger',
-                    'reactivate', 'réactiver', '续期', '续订', '延长')
-        xpath_parts = []
-        for kw in keywords:
-            for attr in (None, '@aria-label', '@title'):
-                if attr is None:
-                    expr = ('contains(translate(normalize-space(.), '
-                            '"ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", '
-                            '"abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), '
-                            f'"{kw}")')
-                else:
-                    expr = (f'contains(translate({attr}, '
-                            '"ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ", '
-                            f'"abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"), "{kw}")')
-                xpath_parts.append(expr)
-        xpath = ('//button[' + ' or '.join(xpath_parts) + '] | '
-                 '//a[' + ' or '.join(xpath_parts) + '] | '
-                 '//*[@role="button"][' + ' or '.join(xpath_parts) + ']')
-        try:
-            btns = sb.driver.find_elements(By.XPATH, xpath)
-            found = [b for b in btns if b.is_displayed() and b.is_enabled()]
-        except Exception:
-            pass
 
     return unique_elements(found)
 
@@ -322,24 +290,26 @@ def has_visible_renew_button(sb):
 
 
 def dump_visible_buttons(sb, context='展开区'):
+    """★ 打印全部按钮（含隐藏），标记可见性"""
     try:
         info = sb.driver.execute_script('''
             const out = [];
             document.querySelectorAll('button, a, [role="button"], .client-btn__content').forEach(el => {
-                if (!el.offsetParent) return;
                 const text = (el.textContent || '').trim().slice(0, 60);
                 const aria = (el.getAttribute('aria-label') || '').slice(0, 60);
                 const title = (el.getAttribute('title') || '').slice(0, 60);
                 const cls = (el.className || '').toString().slice(0, 80);
-                if (text || aria || title) {
-                    out.push({tag: el.tagName, text, aria, title, cls});
+                const visible = !!el.offsetParent;
+                if (text || aria || title || cls) {
+                    out.push({tag: el.tagName, text, aria, title, cls, visible});
                 }
             });
             return out;
         ''')
-        print(f"  🔎 [{context}] 可见按钮/链接 ({len(info)} 个):")
-        for i, b in enumerate(info[:60], 1):
-            print(f"      #{i} <{b['tag']}> text='{b['text']}' aria='{b['aria']}' title='{b['title']}' cls='{b['cls']}'")
+        print(f"  🔎 [{context}] 全部按钮/链接 ({len(info)} 个):")
+        for i, b in enumerate(info[:100], 1):
+            v = '✓' if b.get('visible') else '✗'
+            print(f"      #{i} [{v}] <{b['tag']}> text='{b['text']}' aria='{b['aria']}' title='{b['title']}' cls='{b['cls']}'")
     except Exception as e:
         print(f"  dump 可见按钮失败: {e}")
 
@@ -371,18 +341,15 @@ def find_card_container_from_child(sb, child):
     )
 
 
-# ==================== find_project_cards（核心修复） ====================
+# ==================== find_project_cards ====================
 
 def find_project_cards(sb):
-    """
-    ★ 修复版：在 renewals 视图下跳过 Actif 点击，直接找续期按钮。
-    """
     cards = []
     is_renewals_view = 'view=renewals' in sb.get_current_url()
     if is_renewals_view:
-        print("📍 检测到续期视图 (view=renewals)，跳过 Actif 点击，直接查找续期按钮...")
+        print("📍 检测到续期视图 (view=renewals)")
 
-    # ===== 1. 尝试通过 manage/renew 按钮定位行容器 =====
+    # ===== 尝试通过 manage/renew 按钮定位行容器 =====
     try:
         manage_btns = find_manage_buttons(sb.driver)
     except Exception:
@@ -429,7 +396,7 @@ def find_project_cards(sb):
             except Exception:
                 continue
 
-    # ===== 2. 兜底：通过 UUID 解析表格行 =====
+    # ===== 兜底：通过 UUID 解析表格行 =====
     if not cards:
         try:
             rows = sb.driver.execute_script('''
@@ -484,8 +451,28 @@ def find_project_cards(sb):
                 cards.append(row)
                 continue
 
-            # ★ 关键修复：如果是 renewals 视图，跳过 Actif 点击
-            if not is_renewals_view:
+            # ★★★ renewals 视图：点击 Details 展开 ★★★
+            if is_renewals_view:
+                try:
+                    # 找该行内的 Details 链接/按钮（精确文本 == "Details"）
+                    all_btns = row.find_elements(By.XPATH, './/a | .//button')
+                    details_btn = None
+                    for b in all_btns:
+                        try:
+                            if (b.text or '').strip() == 'Details' and b.is_displayed():
+                                details_btn = b
+                                break
+                        except Exception:
+                            continue
+                    if details_btn is not None:
+                        safe_click_element(sb, details_btn, "Details 展开")
+                        print("  ✅ 已点击 Details 展开")
+                        sb.sleep(3)
+                        dump_visible_buttons(sb, 'Details 展开后')
+                except Exception as e:
+                    print(f"  点击 Details 失败: {e}")
+            else:
+                # 原有 Actif 逻辑
                 status_els = []
                 try:
                     status_els = row.find_elements(
@@ -534,25 +521,6 @@ def find_project_cards(sb):
                         dump_visible_buttons(sb, 'Actif 展开后')
                     except Exception as e:
                         print(f"  点击 Actif 失败: {e}")
-                else:
-                    btns = []
-                    try:
-                        btns = row.find_elements(
-                            By.XPATH,
-                            './/*[@aria-controls and starts-with(@aria-controls, "service-details-")] | '
-                            './/button[contains(@aria-label, "Details")] | '
-                            './/*[starts-with(@aria-label, "Details : ")]'
-                        )
-                    except Exception:
-                        btns = []
-                    if btns:
-                        try:
-                            safe_click_element(sb, btns[0], "Details 展开")
-                            print("  ✅ 已点击 Details 展开")
-                            sb.sleep(2.5)
-                            dump_visible_buttons(sb, 'Details 展开后')
-                        except Exception as e:
-                            print(f"  点击 Details 失败: {e}")
 
             # ===== 读取项目信息 =====
             name = ''
@@ -583,7 +551,7 @@ def find_project_cards(sb):
                                 and not re.search(
                                     r'expire|expiry|renouvel|renew|manage|gérer|gerer|'
                                     r'续期|重新激活|恢复|暂停|过期|到期|管理|actif|active|'
-                                    r'one-off|auto|renew|status|type',
+                                    r'one-off|auto|renew|status|type|details',
                                     line, re.I
                                 ):
                             name = line
@@ -606,7 +574,7 @@ def find_project_cards(sb):
                         }
                     });
                     for (const r of results) {
-                        if (/\\d+\\s*(?:j|h|jours?|heures?|days?|hours?|d|天|小时)\\b/i.test(r)) return r;
+                        if (/\\d+\\s*(?:j|h|jours?|heures?|days?|hours?|d|天|小时|day|hour)\\b/i.test(r)) return r;
                     }
                     return results.length ? results[0] : '';
                 ''') or ''
@@ -616,7 +584,10 @@ def find_project_cards(sb):
             if not expiry:
                 try:
                     row_text = (row.text or '').strip()
-                    m = re.search(r'(\d+\s*(?:j|h|jours?|heures?|days?|hours?|d|天|小时)\b)', row_text, re.I)
+                    m = re.search(
+                        r'(\d+\s*(?:j|h|jours?|heures?|days?|hours?|d|天|小时)\b)',
+                        row_text, re.I
+                    )
                     if m:
                         expiry = m.group(0).strip()
                 except Exception:
@@ -1265,7 +1236,6 @@ def main():
 
         sb.set_window_size(1920, 1080)
 
-        # 打开续期视图
         print(f"打开续期视图: {RENEWALS_URL}")
         sb.open(RENEWALS_URL)
         sb.wait_for_ready_state_complete()
@@ -1356,7 +1326,7 @@ def main():
                         renew_btns = find_renew_buttons_global(sb)
 
                     if not renew_btns:
-                        print(f"[{project_name}] 未找到按钮，dump 按钮列表...")
+                        print(f"[{project_name}] 未找到续期按钮，dump 按钮列表...")
                         dump_visible_buttons(sb, f'{project_name} 无按钮')
 
                     if renew_btns:
@@ -1364,7 +1334,9 @@ def main():
                         safe_click_element(sb, renew_btns[0], f"[{project_name}] {action_label}按钮")
                         print(f"[{project_name}] 点击 {action_label}...")
                         handle_renew_antibot(sb, project_name)
-                        sb.sleep(4)
+                        # ★ 延长等待到 8 秒
+                        sb.sleep(8)
+                        dump_visible_buttons(sb, f'{project_name} 点击后')
 
                         try:
                             cards_after = find_project_cards(sb)
