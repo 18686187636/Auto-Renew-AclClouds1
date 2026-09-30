@@ -112,8 +112,6 @@ def mask_email(email):
     return f"{masked_local}@{domain}"
 
 
-# ==================== 通知消息 ====================
-
 def build_success_message(project_name, old_expiry, new_expiry):
     return "\n".join([
         "🇫🇷 Aclclouds 续期通知", "",
@@ -160,12 +158,10 @@ def build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note)
 # ==================== 详情页处理 ====================
 
 def read_detail_page_info(sb):
-    """从服务器详情页读：项目名、剩余时间、Renew 按钮"""
     name = ''
     expiry = ''
     renewal_note = ''
 
-    # 项目名：h1/h2/h3 短文本，或从 title 提取
     try:
         for h in sb.driver.find_elements(By.CSS_SELECTOR, 'h1, h2, h3'):
             t = (h.text or '').strip()
@@ -186,7 +182,6 @@ def read_detail_page_info(sb):
         except Exception:
             pass
 
-    # 剩余时间：Time remaining: 1d 1h
     try:
         expiry = sb.driver.execute_script('''
             const t = document.body.innerText || '';
@@ -210,7 +205,6 @@ def read_detail_page_info(sb):
         except Exception:
             pass
 
-    # 续期规则："Free plan - renew every 4 days"
     try:
         renewal_note = sb.driver.execute_script('''
             const t = document.body.innerText || '';
@@ -224,7 +218,6 @@ def read_detail_page_info(sb):
 
 
 def find_renew_button_on_detail(sb):
-    """在详情页找 'Renew' 按钮（精确匹配）"""
     try:
         btns = sb.driver.find_elements(By.XPATH, '//button')
         for b in btns:
@@ -251,7 +244,7 @@ def should_try_renew(expiry_str):
     return False
 
 
-# ==================== 登录相关（保持不变） ====================
+# ==================== 登录相关 ====================
 
 def click_captcha_checkbox(sb, label='验证码', timeout=10):
     selectors = [
@@ -275,13 +268,39 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10):
         except Exception as e:
             last_error = e
             continue
+
+    # ★ 兜底：如果没找到验证码，但页面上有 Sign in 按钮，认为无需验证码
     if not clicked:
+        try:
+            has_login_btn = sb.driver.execute_script('''
+                const btns = document.querySelectorAll(
+                    'button[type="submit"], div.auth-submit-btn'
+                );
+                for (const b of btns) {
+                    if (b.offsetParent) return true;
+                }
+                for (const b of document.querySelectorAll('button, div, a')) {
+                    if ((b.textContent || '').trim() === 'Sign in' && b.offsetParent) {
+                        return true;
+                    }
+                }
+                return false;
+            ''')
+        except Exception:
+            has_login_btn = False
+
+        if has_login_btn:
+            print(f"{label} 未出现，判断当前无需验证码，继续登录")
+            return True
+
         print(f"{label} 点击复选框失败: {last_error}")
         return False
+
     sb.sleep(5)
     if not handle_captcha_challenge(sb, label, timeout=20):
         print(f"{label} 验证流程未完成")
         return False
+
     try:
         checked = sb.get_attribute(selector, 'aria-checked')
         if checked == 'true':
@@ -576,7 +595,6 @@ def main():
             sb.wait_for_ready_state_complete()
             time.sleep(3)
 
-        # 等待页面渲染
         print("等待续期视图渲染...")
         start = time.time()
         while time.time() - start < 20:
@@ -593,7 +611,6 @@ def main():
             sb.sleep(0.5)
         sb.sleep(1)
 
-        # ★ 收集所有 /server/{uuid} 链接
         links = sb.driver.execute_script('''
             const out = [];
             document.querySelectorAll('a[href*="/server/"]').forEach(a => {
@@ -611,7 +628,6 @@ def main():
             return uniq;
         ''')
 
-        # 兜底：直接从当前 URL 提取 uuid（如果已经在详情页）
         if not links:
             m = re.search(r'/server/([0-9a-f-]+)', sb.get_current_url(), re.I)
             if m:
@@ -661,7 +677,6 @@ def main():
                 handle_renew_antibot(sb, name)
                 sb.sleep(5)
 
-                # 重新打开详情页读新时间
                 try:
                     sb.open(href)
                     sb.wait_for_ready_state_complete()
