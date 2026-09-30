@@ -102,57 +102,103 @@ def mask_email(email):
 
 # ==================== 登录相关 ====================
 
+def _has_captcha_challenge(sb):
+    """检查当前页面是否有可见的挑战容器"""
+    try:
+        return sb.driver.execute_script('''
+            const sels = [
+                '.auth-captcha-challenge',
+                '.auth-capcha-challenge',
+                '[class*="captcha"][class*="challenge"]'
+            ];
+            for (const s of sels) {
+                const el = document.querySelector(s);
+                if (el && el.offsetParent !== null) return true;
+            }
+            return false;
+        ''')
+    except Exception:
+        return False
+
+
 def click_captcha_checkbox(sb, label='验证码', timeout=10, optional=False):
-    """点击 ACLClouds 页面上的人机验证复选框，并处理图形验证码挑战。
-    ★ optional=True 时，找不到复选框视为"本轮无需挑战"，返回 True；
-      optional=False（默认）时，找不到视为失败，返回 False。
-    """
+    """勾选 Cap 复选框。点击后等 5 秒，看是否弹出挑战。
+    ★ 新增对 div.checkbox[part="checkbox"] 的支持"""
     selectors = [
+        'div.checkbox[part="checkbox"]',
+        '[part="checkbox"]',
+        'cap-widget div[part="checkbox"]',
         'div.auth-captcha-inner[role="checkbox"]',
         '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
         '//div[contains(., "I am not a robot")]//*[@role="checkbox"]',
         '//div[contains(@class, "modal") and contains(., "Secured by ACLClouds")]//*[@role="checkbox"]',
     ]
 
-    last_error = None
     clicked = False
     selector = None
     for candidate in selectors:
         try:
-            sb.wait_for_element_visible(candidate, timeout=timeout)
-            scroll_to_selector(sb, candidate)
-            sb.uc_click(candidate)
-            sb.sleep(1)
-            selector = candidate
-            clicked = True
-            break
+            if candidate.startswith('/'):
+                elems = sb.driver.find_elements(By.XPATH, candidate)
+                elem = None
+                for e in elems:
+                    if e.is_displayed():
+                        elem = e
+                        break
+            else:
+                elem = sb.wait_for_element_visible(candidate, timeout=timeout)
+            if not elem or not elem.is_displayed():
+                continue
+            try:
+                sb.driver.execute_script(
+                    'arguments[0].scrollIntoView({block: "center", inline: "center"});',
+                    elem,
+                )
+                sb.sleep(0.3)
+            except Exception:
+                pass
+            # 尝试用 seleniuim 原生点击，失败则用 JS 点击
+            if safe_click_element(sb, elem, f"{label} 复选框"):
+                selector = candidate
+                clicked = True
+                break
         except Exception as e:
-            last_error = e
             continue
 
     if not clicked:
         if optional:
-            print(f"{label} 未出现，视为本轮无需验证码")
+            print(f"{label} 未找到复选框，等 5 秒看是否静默通过...")
+            sb.sleep(5)
+            if _has_captcha_challenge(sb):
+                print(f"{label} 出现挑战，处理中...")
+                return handle_captcha_challenge(sb, label, timeout=20)
+            print(f"{label} 未弹出挑战，视为静默通过")
             return True
-        print(f"{label} 点击复选框失败: {last_error}")
+        print(f"{label} 未找到复选框")
         return False
 
+    print(f"{label} 已勾选，等待 5 秒...")
     sb.sleep(5)
-    captcha_ok = handle_captcha_challenge(sb, label, timeout=20)
-    if not captcha_ok:
-        print(f"{label} 验证流程未完成，等待状态仍未确认。")
-        return False
 
+    # 5 秒后：有挑战就处理，没挑战视为通过
+    if _has_captcha_challenge(sb):
+        print(f"{label} 弹出挑战，处理中...")
+        return handle_captcha_challenge(sb, label, timeout=20)
+
+    # 检查 aria-checked 状态
     try:
-        checked = sb.get_attribute(selector, 'aria-checked')
-        if checked == 'true':
-            print(f"{label} 验证通过")
-            return True
+        if selector and not selector.startswith('/'):
+            checked = sb.get_attribute(selector, 'aria-checked')
+            if checked == 'true':
+                print(f"{label} 复选框已勾选，无需挑战")
+            else:
+                print(f"{label} 未弹出挑战，视为静默通过")
         else:
-            print(f"{label} 验证未完成，当前状态: {checked}")
-            return False
+            print(f"{label} 未弹出挑战，视为静默通过")
     except Exception:
-        return False
+        print(f"{label} 未弹出挑战，视为静默通过")
+
+    return True
 
 
 def handle_captcha_challenge(sb, label='验证码', timeout=20):
@@ -358,9 +404,16 @@ def fill_input(sb, selector, value, label, timeout=15):
 
 
 def click_signin(sb):
-    for selector in ['button[type="submit"]', 'div.auth-submit-btn',
-                     '//button[contains(text(), "Sign in")]',
-                     '//div[contains(text(), "Sign in")]']:
+    """点击提交按钮。★ 新增 button.auth-submit-btn 和 Se connecter 文本"""
+    for selector in [
+        'button[type="submit"]',
+        'button.auth-submit-btn',
+        'div.auth-submit-btn',
+        '//button[contains(text(), "Se connecter")]',
+        '//button[contains(text(), "Sign in")]',
+        '//div[contains(text(), "Se connecter")]',
+        '//div[contains(text(), "Sign in")]',
+    ]:
         try:
             sb.wait_for_element_visible(selector, timeout=5)
             scroll_to_selector(sb, selector)
@@ -372,7 +425,11 @@ def click_signin(sb):
     sb.execute_script('''
         var els = document.querySelectorAll('div, button, a');
         for (var el of els) {
-            if (el.textContent.trim() === 'Sign in') { el.click(); return true; }
+            const t = el.textContent.trim();
+            if (t === 'Sign in' || t === 'Se connecter') {
+                el.click();
+                return true;
+            }
         }
         return false;
     ''')
@@ -398,18 +455,7 @@ def get_login_error(sb):
 
 
 def login(sb, email, password):
-    """执行登录（无重试）。兼容 Cap 验证码"有时静默通过、有时弹出挑战"的行为。
-    
-    流程：
-      1. 填邮箱、密码
-      2. 先等 8 秒看挑战是否出现
-         - 出现 → 处理挑战
-         - 未出现 → 视为"本轮无需挑战"，继续
-      3. 点击 Sign in
-      4. 等 5 秒，检查是否弹出新挑战
-         - 弹出 → 处理挑战 → 再点 Sign in
-      5. 等待 URL 变化，检查结果
-    """
+    """执行登录（无重试）。兼容 Cap 验证码"有时静默通过、有时弹出挑战"的行为。"""
     print("开始登录流程...")
 
     if not fill_input(sb, '#username', email, '邮箱'):
@@ -417,29 +463,19 @@ def login(sb, email, password):
     if not fill_input(sb, '#password', password, '密码'):
         print("⚠️ 密码仍未能正确填入。")
 
-    # 第一次：8 秒内看挑战是否出现
+    # 勾选 Cap 复选框（新 DOM 结构），等 5 秒看是否弹出挑战
     click_captcha_checkbox(sb, '登录验证码', timeout=8, optional=True)
 
     sb.sleep(1)
     login_page_url = sb.get_current_url()
 
-    # 点击 Sign in
+    # 点击提交
     click_signin(sb)
     sb.sleep(5)
 
-    # 检查点击后是否出现挑战
-    try:
-        captcha_now = sb.driver.execute_script('''
-            const sel = '.auth-captcha-challenge, .auth-capcha-challenge, ' +
-                        '[class*="captcha"][class*="challenge"]';
-            const c = document.querySelector(sel);
-            return c ? c.offsetParent !== null : false;
-        ''')
-    except Exception:
-        captcha_now = False
-
-    if captcha_now:
-        print("点击 Sign in 后出现验证码挑战，处理中...")
+    # 检查点击后是否弹出新的挑战
+    if _has_captcha_challenge(sb):
+        print("点击提交后出现验证码挑战，处理中...")
         handle_captcha_challenge(sb, '登录验证码', timeout=20)
         sb.sleep(1)
         click_signin(sb)
