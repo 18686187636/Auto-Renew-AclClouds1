@@ -102,8 +102,11 @@ def mask_email(email):
 
 # ==================== 登录相关 ====================
 
-def click_captcha_checkbox(sb, label='验证码', timeout=30):
-    """点击人机验证复选框。★ timeout 延长到 30 秒，超时后 dump 页面 captcha 元素。"""
+def click_captcha_checkbox(sb, label='验证码', timeout=10, optional=False):
+    """点击 ACLClouds 页面上的人机验证复选框，并处理图形验证码挑战。
+    ★ optional=True 时，找不到复选框视为"本轮无需挑战"，返回 True；
+      optional=False（默认）时，找不到视为失败，返回 False。
+    """
     selectors = [
         'div.auth-captcha-inner[role="checkbox"]',
         '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
@@ -128,29 +131,9 @@ def click_captcha_checkbox(sb, label='验证码', timeout=30):
             continue
 
     if not clicked:
-        try:
-            info = sb.driver.execute_script('''
-                const out = [];
-                document.querySelectorAll(
-                    '[role="checkbox"], [class*="captcha"], [class*="Captcha"], ' +
-                    '[id*="captcha"], iframe[src*="captcha"], iframe[src*="recaptcha"]'
-                ).forEach(el => {
-                    out.push({
-                        tag: el.tagName,
-                        cls: (el.className || '').toString().slice(0, 120),
-                        id: (el.id || '').slice(0, 60),
-                        role: el.getAttribute('role') || '',
-                        visible: !!el.offsetParent,
-                        src: (el.getAttribute('src') || '').slice(0, 120)
-                    });
-                });
-                return out;
-            ''')
-            print(f"🔍 验证码元素诊断 ({len(info)} 个):")
-            for i, x in enumerate(info[:15], 1):
-                print(f"  #{i} <{x['tag']}> id='{x['id']}' role='{x['role']}' visible={x['visible']} cls='{x['cls']}' src='{x['src']}'")
-        except Exception as e:
-            print(f"诊断失败: {e}")
+        if optional:
+            print(f"{label} 未出现，视为本轮无需验证码")
+            return True
         print(f"{label} 点击复选框失败: {last_error}")
         return False
 
@@ -173,7 +156,7 @@ def click_captcha_checkbox(sb, label='验证码', timeout=30):
 
 
 def handle_captcha_challenge(sb, label='验证码', timeout=20):
-    """处理图形验证码挑战（完全参考你提供的旧脚本）。"""
+    """处理图形验证码挑战：先等待挑战加载，再尝试点击对应图像。"""
     start_time = time.time()
     challenge = None
     last_error = None
@@ -374,26 +357,7 @@ def fill_input(sb, selector, value, label, timeout=15):
     return entered_value == value
 
 
-def login(sb, email, password):
-    """执行登录（无重试），返回是否成功。"""
-    print("开始登录流程...")
-
-    if not fill_input(sb, '#username', email, '邮箱'):
-        print("⚠️ 邮箱仍未能正确填入，可能页面有动态行为。")
-
-    if not fill_input(sb, '#password', password, '密码'):
-        print("⚠️ 密码仍未能正确填入。")
-
-    captcha_ok = click_captcha_checkbox(sb, '登录验证码')
-    if not captcha_ok:
-        print("⚠️ 登录验证码未完成，暂不点击登录按钮，避免直接提交。")
-        return False
-
-    sb.sleep(1)
-
-    login_page_url = sb.get_current_url()
-    clicked = False
-
+def click_signin(sb):
     for selector in ['button[type="submit"]', 'div.auth-submit-btn',
                      '//button[contains(text(), "Sign in")]',
                      '//div[contains(text(), "Sign in")]']:
@@ -401,24 +365,87 @@ def login(sb, email, password):
             sb.wait_for_element_visible(selector, timeout=5)
             scroll_to_selector(sb, selector)
             sb.click(selector)
-            clicked = True
             print(f"点击 Sign in 使用: {selector}")
-            break
+            return True
         except Exception as e:
             print(f"选择器 {selector} 失败: {e}")
-    if not clicked:
-        print("所有选择器失败，使用 JS 点击")
-        sb.execute_script('''
-            var els = document.querySelectorAll('div, button, a');
-            for (var el of els) {
-                if (el.textContent.trim() === 'Sign in') {
-                    el.click();
-                    return true;
+    sb.execute_script('''
+        var els = document.querySelectorAll('div, button, a');
+        for (var el of els) {
+            if (el.textContent.trim() === 'Sign in') { el.click(); return true; }
+        }
+        return false;
+    ''')
+    return False
+
+
+def get_login_error(sb):
+    try:
+        return sb.driver.execute_script('''
+            const els = document.querySelectorAll(
+                '.auth-error-text, .alert-danger, .error-message, [class*="error"], [class*="Error"]'
+            );
+            for (const el of els) {
+                if (el.offsetParent) {
+                    const t = (el.textContent || '').trim();
+                    if (t) return t;
                 }
             }
-            return false;
-        ''')
+            return '';
+        ''') or ''
+    except Exception:
+        return ''
 
+
+def login(sb, email, password):
+    """执行登录（无重试）。兼容 Cap 验证码"有时静默通过、有时弹出挑战"的行为。
+    
+    流程：
+      1. 填邮箱、密码
+      2. 先等 8 秒看挑战是否出现
+         - 出现 → 处理挑战
+         - 未出现 → 视为"本轮无需挑战"，继续
+      3. 点击 Sign in
+      4. 等 5 秒，检查是否弹出新挑战
+         - 弹出 → 处理挑战 → 再点 Sign in
+      5. 等待 URL 变化，检查结果
+    """
+    print("开始登录流程...")
+
+    if not fill_input(sb, '#username', email, '邮箱'):
+        print("⚠️ 邮箱仍未能正确填入，可能页面有动态行为。")
+    if not fill_input(sb, '#password', password, '密码'):
+        print("⚠️ 密码仍未能正确填入。")
+
+    # 第一次：8 秒内看挑战是否出现
+    click_captcha_checkbox(sb, '登录验证码', timeout=8, optional=True)
+
+    sb.sleep(1)
+    login_page_url = sb.get_current_url()
+
+    # 点击 Sign in
+    click_signin(sb)
+    sb.sleep(5)
+
+    # 检查点击后是否出现挑战
+    try:
+        captcha_now = sb.driver.execute_script('''
+            const sel = '.auth-captcha-challenge, .auth-capcha-challenge, ' +
+                        '[class*="captcha"][class*="challenge"]';
+            const c = document.querySelector(sel);
+            return c ? c.offsetParent !== null : false;
+        ''')
+    except Exception:
+        captcha_now = False
+
+    if captcha_now:
+        print("点击 Sign in 后出现验证码挑战，处理中...")
+        handle_captcha_challenge(sb, '登录验证码', timeout=20)
+        sb.sleep(1)
+        click_signin(sb)
+        sb.sleep(5)
+
+    # 等待 URL 变化，检查结果
     try:
         wait_for_url_change(sb, login_page_url, timeout=30)
         current = sb.get_current_url()
@@ -426,22 +453,14 @@ def login(sb, email, password):
             print(f"✅ 登录成功！URL: {current}")
             return True
         else:
-            error_msg = ""
-            try:
-                errors = sb.driver.find_elements(By.CSS_SELECTOR, '.auth-error-text, .alert-danger, .error-message')
-                error_msg = errors[0].text.strip() if errors else ''
-            except Exception:
-                pass
+            error_msg = get_login_error(sb)
             print(f"❌ 登录失败，当前: {current}，错误: {error_msg}")
             return False
     except Exception as e:
         print(f"登录过程异常: {e}")
-        try:
-            errors = sb.driver.find_elements(By.CSS_SELECTOR, '.auth-error-text, .alert-danger, .error-message')
-            if errors:
-                print(f"页面错误信息: {errors[0].text.strip()}")
-        except Exception:
-            pass
+        err = get_login_error(sb)
+        if err:
+            print(f"页面错误信息: {err}")
         return False
 
 
@@ -454,7 +473,7 @@ def handle_renew_antibot(sb, project_name):
         try:
             sb.wait_for_element_visible(selector, timeout=5)
             print(f"[{project_name}] 检测到续期人机验证窗口")
-            return click_captcha_checkbox(sb, '续期人机验证', timeout=5)
+            return click_captcha_checkbox(sb, '续期人机验证', timeout=5, optional=True)
         except Exception:
             continue
     print(f"[{project_name}] 未检测到续期人机验证窗口")
