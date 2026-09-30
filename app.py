@@ -100,10 +100,10 @@ def mask_email(email):
     return f"{masked_local}@{domain}"
 
 
-# ==================== 登录相关（完全参考你提供的旧脚本） ====================
+# ==================== 登录相关 ====================
 
-def click_captcha_checkbox(sb, label='验证码', timeout=10):
-    """点击 ACLClouds 页面上的人机验证复选框，并处理图形验证码挑战。"""
+def click_captcha_checkbox(sb, label='验证码', timeout=30):
+    """点击人机验证复选框。★ timeout 延长到 30 秒，超时后 dump 页面 captcha 元素。"""
     selectors = [
         'div.auth-captcha-inner[role="checkbox"]',
         '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
@@ -128,10 +128,32 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10):
             continue
 
     if not clicked:
+        try:
+            info = sb.driver.execute_script('''
+                const out = [];
+                document.querySelectorAll(
+                    '[role="checkbox"], [class*="captcha"], [class*="Captcha"], ' +
+                    '[id*="captcha"], iframe[src*="captcha"], iframe[src*="recaptcha"]'
+                ).forEach(el => {
+                    out.push({
+                        tag: el.tagName,
+                        cls: (el.className || '').toString().slice(0, 120),
+                        id: (el.id || '').slice(0, 60),
+                        role: el.getAttribute('role') || '',
+                        visible: !!el.offsetParent,
+                        src: (el.getAttribute('src') || '').slice(0, 120)
+                    });
+                });
+                return out;
+            ''')
+            print(f"🔍 验证码元素诊断 ({len(info)} 个):")
+            for i, x in enumerate(info[:15], 1):
+                print(f"  #{i} <{x['tag']}> id='{x['id']}' role='{x['role']}' visible={x['visible']} cls='{x['cls']}' src='{x['src']}'")
+        except Exception as e:
+            print(f"诊断失败: {e}")
         print(f"{label} 点击复选框失败: {last_error}")
         return False
 
-    # 给 5 秒加载缓冲，避免图形验证码尚未渲染完成时就开始点击
     sb.sleep(5)
     captcha_ok = handle_captcha_challenge(sb, label, timeout=20)
     if not captcha_ok:
@@ -151,7 +173,7 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10):
 
 
 def handle_captcha_challenge(sb, label='验证码', timeout=20):
-    """处理图形验证码挑战：先等待挑战加载，再尝试点击对应图像。"""
+    """处理图形验证码挑战（完全参考你提供的旧脚本）。"""
     start_time = time.time()
     challenge = None
     last_error = None
@@ -353,18 +375,15 @@ def fill_input(sb, selector, value, label, timeout=15):
 
 
 def login(sb, email, password):
-    """执行登录（不做重试），返回是否成功。"""
+    """执行登录（无重试），返回是否成功。"""
     print("开始登录流程...")
 
-    # 填写邮箱
     if not fill_input(sb, '#username', email, '邮箱'):
         print("⚠️ 邮箱仍未能正确填入，可能页面有动态行为。")
 
-    # 填写密码
     if not fill_input(sb, '#password', password, '密码'):
         print("⚠️ 密码仍未能正确填入。")
 
-    # 验证码
     captcha_ok = click_captcha_checkbox(sb, '登录验证码')
     if not captcha_ok:
         print("⚠️ 登录验证码未完成，暂不点击登录按钮，避免直接提交。")
@@ -372,7 +391,6 @@ def login(sb, email, password):
 
     sb.sleep(1)
 
-    # 点击登录按钮
     login_page_url = sb.get_current_url()
     clicked = False
 
@@ -401,7 +419,6 @@ def login(sb, email, password):
             return false;
         ''')
 
-    # 等待登录结果
     try:
         wait_for_url_change(sb, login_page_url, timeout=30)
         current = sb.get_current_url()
