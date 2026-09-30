@@ -127,7 +127,6 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10):
             last_error = e
             continue
 
-    # 兜底：没找到验证码但页面上有 Sign in 按钮，认为无需验证码
     if not clicked:
         try:
             has_login_btn = sb.driver.execute_script('''
@@ -330,7 +329,6 @@ def fill_input(sb, selector, value, label, timeout=15):
 
 
 def click_signin(sb):
-    """点击 Sign in 按钮"""
     for selector in ['button[type="submit"]', 'div.auth-submit-btn',
                      '//button[contains(text(), "Sign in")]',
                      '//div[contains(text(), "Sign in")]']:
@@ -353,7 +351,6 @@ def click_signin(sb):
 
 
 def dump_login_errors(sb):
-    """打印登录页上的错误信息"""
     try:
         errors = sb.driver.execute_script('''
             const out = [];
@@ -378,22 +375,19 @@ def login(sb, email, password):
     fill_input(sb, '#username', email, '邮箱')
     fill_input(sb, '#password', password, '密码')
 
-    # 先尝试点击验证码（可能不存在）
     click_captcha_checkbox(sb, '登录验证码')
 
     sb.sleep(1)
     login_page_url = sb.get_current_url()
 
-    # ★ 第一次点击 Sign in
     click_signin(sb)
 
-    # ★ 等待 5 秒，检查是否出现了验证码挑战
     sb.sleep(5)
+    # ★ 修复：只用 CSS 选择器，不混 XPath
     captcha_now = sb.driver.execute_script('''
-        const c = document.querySelector(
-            '.auth-captcha-challenge, .auth-capcha-challenge, ' +
-            '//*[contains(@class, "captcha") and contains(@class, "challenge")]'
-        );
+        const sel = '.auth-captcha-challenge, .auth-capcha-challenge, ' +
+                    '[class*="captcha"][class*="challenge"]';
+        const c = document.querySelector(sel);
         return c ? c.offsetParent !== null : false;
     ''')
     if captcha_now:
@@ -403,7 +397,6 @@ def login(sb, email, password):
         click_signin(sb)
         sb.sleep(5)
 
-    # 打印错误信息（如有）
     dump_login_errors(sb)
 
     try:
