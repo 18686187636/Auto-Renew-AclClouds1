@@ -102,16 +102,18 @@ def mask_email(email):
     return f"{masked_local}@{domain}"
 
 
-# ==================== 登录相关 ====================
+# ==================== 登录相关（参考旧版逻辑） ====================
 
-def click_captcha_checkbox(sb, label='验证码', timeout=20):
-    """★ 修改：timeout 默认 20 秒；不再"未找到就跳过"，未找到直接返回 False"""
+def click_captcha_checkbox(sb, label='验证码', timeout=10):
+    """点击 ACLClouds 页面上的人机验证复选框，并处理图形验证码挑战。
+    ★ 参考旧版：找不到复选框直接返回 False，不做"未找到就跳过"的兜底。"""
     selectors = [
         'div.auth-captcha-inner[role="checkbox"]',
         '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
         '//div[contains(., "I am not a robot")]//*[@role="checkbox"]',
         '//div[contains(@class, "modal") and contains(., "Secured by ACLClouds")]//*[@role="checkbox"]',
     ]
+
     last_error = None
     clicked = False
     selector = None
@@ -129,12 +131,14 @@ def click_captcha_checkbox(sb, label='验证码', timeout=20):
             continue
 
     if not clicked:
-        print(f"{label} 未找到验证码复选框: {last_error}")
+        print(f"{label} 点击复选框失败: {last_error}")
         return False
 
+    # 给图形验证码 5 秒加载缓冲
     sb.sleep(5)
-    if not handle_captcha_challenge(sb, label, timeout=20):
-        print(f"{label} 验证流程未完成")
+    captcha_ok = handle_captcha_challenge(sb, label, timeout=20)
+    if not captcha_ok:
+        print(f"{label} 验证流程未完成，等待状态仍未确认。")
         return False
 
     try:
@@ -142,14 +146,18 @@ def click_captcha_checkbox(sb, label='验证码', timeout=20):
         if checked == 'true':
             print(f"{label} 验证通过")
             return True
-        print(f"{label} 验证未完成，状态: {checked}")
-        return False
+        else:
+            print(f"{label} 验证未完成，当前状态: {checked}")
+            return False
     except Exception:
         return False
 
 
 def handle_captcha_challenge(sb, label='验证码', timeout=20):
+    """处理图形验证码挑战：等待挑战加载，尝试点击对应图像。
+    ★ 参考旧版：不重复刷新，不混淆 CSS/XPath。"""
     start_time = time.time()
+    challenge = None
     challenge_selectors = [
         '.auth-captcha-challenge',
         '.auth-capcha-challenge',
@@ -161,7 +169,8 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
         for selector in challenge_selectors:
             try:
                 if selector.startswith('/'):
-                    for elem in sb.driver.find_elements(By.XPATH, selector):
+                    elems = sb.driver.find_elements(By.XPATH, selector)
+                    for elem in elems:
                         if elem.is_displayed():
                             return elem
                 else:
@@ -172,7 +181,6 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
                 continue
         return None
 
-    challenge = None
     while time.time() - start_time < timeout:
         challenge = get_challenge()
         if challenge:
@@ -181,29 +189,41 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
         try:
             checkbox = sb.driver.find_element(By.CSS_SELECTOR, 'div.auth-captcha-inner[role="checkbox"]')
             if checkbox.get_attribute('aria-checked') == 'true':
-                print(f"{label} 验证复选框已勾选")
+                print(f"{label} 验证复选框已勾选，验证码流程已完成")
                 return True
         except Exception:
             pass
         sb.sleep(0.3)
+
     if not challenge:
         print(f"{label} 等待验证码挑战加载超时")
         return False
 
     target = ''
     try:
-        target = challenge.find_element(By.CSS_SELECTOR, '.auth-captcha-prompt strong').text.strip()
+        prompt = challenge.find_element(By.CSS_SELECTOR, '.auth-captcha-prompt strong')
+        target = prompt.text.strip()
     except Exception:
         pass
+    if not target:
+        try:
+            prompt = challenge.find_element(By.CSS_SELECTOR, '.auth-capcha-prompt strong')
+            target = prompt.text.strip()
+        except Exception:
+            pass
     if not target:
         aria_label = challenge.get_attribute('aria-label') or ''
         if 'Click on ' in aria_label:
             target = aria_label.split('Click on ')[-1].strip()
+
     print(f"{label} 目标文本: {target or '未识别'}")
 
     option_selectors = [
-        '.auth-captcha-option', '.auth-capcha-option',
-        './/button', './/a', './/div[@role="button"]',
+        '.auth-captcha-option',
+        '.auth-capcha-option',
+        './/button',
+        './/a',
+        './/div[@role="button"]',
     ]
 
     def get_options(challenge_elem):
@@ -214,24 +234,40 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
                 else:
                     elems = challenge_elem.find_elements(By.XPATH, sel)
                 if elems:
-                    return [e for e in elems if e.is_displayed() and e.is_enabled()]
+                    return [elem for elem in elems if elem.is_displayed() and elem.is_enabled()]
             except Exception:
                 continue
         return []
 
     attempts = 0
-    while attempts < 8:
+    max_attempts = 8
+    while attempts < max_attempts:
         challenge = get_challenge()
         if not challenge:
-            return False
+            print(f"{label} 挑战已消失，验证完成")
+            return True
+
         options = get_options(challenge)
         if not options:
+            print(f"{label} 当前挑战没有可点击选项，重试中...")
             attempts += 1
             sb.sleep(0.8)
             continue
 
+        current_target = ''
+        try:
+            prompt = challenge.find_element(By.CSS_SELECTOR, '.auth-captcha-prompt strong')
+            current_target = prompt.text.strip()
+        except Exception:
+            pass
+        if not current_target:
+            aria_label = challenge.get_attribute('aria-label') or ''
+            if 'Click on ' in aria_label:
+                current_target = aria_label.split('Click on ')[-1].strip()
+
         candidate = None
-        if target:
+        effective_target = current_target or target
+        if effective_target:
             for opt in options:
                 opt_text = (opt.text or '').strip()
                 if not opt_text:
@@ -245,30 +281,36 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
                         opt_text = (opt.get_attribute('aria-label') or '').strip()
                     except Exception:
                         pass
-                if opt_text and target.lower() in opt_text.lower():
+                if opt_text and effective_target.lower() in opt_text.lower():
                     candidate = opt
                     break
+
         if candidate is None:
             candidate = options[0]
 
         print(f"{label} 点击候选选项 #{attempts + 1} ...")
-        if not safe_click_element(sb, candidate, f"{label} 选项"):
+        clicked = safe_click_element(sb, candidate, f"{label} 选项候选")
+        if not clicked:
             attempts += 1
             sb.sleep(0.8)
             continue
-        sb.sleep(4.5)
+
+        sb.sleep(4)
 
         try:
             checkbox = sb.driver.find_element(By.CSS_SELECTOR, 'div.auth-captcha-inner[role="checkbox"]')
             if checkbox.get_attribute('aria-checked') == 'true':
-                print(f"{label} 验证复选框已勾选")
+                print(f"{label} 验证复选框已勾选，验证码流程完成")
                 return True
         except Exception:
             pass
+
         if not get_challenge():
             print(f"{label} 挑战已消失，验证完成")
             return True
+
         attempts += 1
+
     print(f"{label} 多次尝试后仍未完成验证码")
     return False
 
@@ -307,30 +349,7 @@ def fill_input(sb, selector, value, label, timeout=15):
     return entered == value
 
 
-def click_signin(sb):
-    for selector in ['button[type="submit"]', 'div.auth-submit-btn',
-                     '//button[contains(text(), "Sign in")]',
-                     '//div[contains(text(), "Sign in")]']:
-        try:
-            sb.wait_for_element_visible(selector, timeout=5)
-            scroll_to_selector(sb, selector)
-            sb.click(selector)
-            print(f"点击 Sign in 使用: {selector}")
-            return True
-        except Exception as e:
-            print(f"选择器 {selector} 失败: {e}")
-    sb.execute_script('''
-        var els = document.querySelectorAll('div, button, a');
-        for (var el of els) {
-            if (el.textContent.trim() === 'Sign in') { el.click(); return true; }
-        }
-        return false;
-    ''')
-    return False
-
-
 def get_login_error(sb):
-    """★ 新增：读取登录页错误信息"""
     try:
         return sb.driver.execute_script('''
             const els = document.querySelectorAll(
@@ -349,7 +368,7 @@ def get_login_error(sb):
 
 
 def login(sb, email, password, max_retries=3):
-    """★ 修改：加入 3 次重试；不再跳过验证码；每次重试重新加载登录页"""
+    """★ 参考旧版：必须通过验证码才点 Sign in，不做二次验证码检测，失败重试"""
     for attempt in range(max_retries):
         if attempt > 0:
             print(f"🔄 登录重试 #{attempt + 1}/{max_retries}")
@@ -361,54 +380,53 @@ def login(sb, email, password, max_retries=3):
         fill_input(sb, '#username', email, '邮箱')
         fill_input(sb, '#password', password, '密码')
 
-        # 必须成功处理验证码
-        captcha_ok = click_captcha_checkbox(sb, '登录验证码', timeout=20)
+        # 必须通过验证码才继续
+        captcha_ok = click_captcha_checkbox(sb, '登录验证码')
         if not captcha_ok:
-            print("⚠️ 本次登录验证码未完成，准备重试")
+            print("⚠️ 登录验证码未完成，准备重试")
             continue
 
         sb.sleep(1)
         login_page_url = sb.get_current_url()
-        click_signin(sb)
-        sb.sleep(5)
-
-        # 检查是否出现新的验证码挑战
-        try:
-            captcha_now = sb.driver.execute_script('''
-                const sel = '.auth-captcha-challenge, .auth-capcha-challenge, ' +
-                            '[class*="captcha"][class*="challenge"]';
-                const c = document.querySelector(sel);
-                return c ? c.offsetParent !== null : false;
+        clicked = False
+        for selector in ['button[type="submit"]', 'div.auth-submit-btn',
+                         '//button[contains(text(), "Sign in")]',
+                         '//div[contains(text(), "Sign in")]']:
+            try:
+                sb.wait_for_element_visible(selector, timeout=5)
+                scroll_to_selector(sb, selector)
+                sb.click(selector)
+                clicked = True
+                print(f"点击 Sign in 使用: {selector}")
+                break
+            except Exception as e:
+                print(f"选择器 {selector} 失败: {e}")
+        if not clicked:
+            sb.execute_script('''
+                var els = document.querySelectorAll('div, button, a');
+                for (var el of els) {
+                    if (el.textContent.trim() === 'Sign in') { el.click(); return true; }
+                }
+                return false;
             ''')
-        except Exception:
-            captcha_now = False
 
-        if captcha_now:
-            print("点击 Sign in 后出现验证码挑战，处理中...")
-            handle_captcha_challenge(sb, '登录验证码', timeout=20)
-            sb.sleep(1)
-            click_signin(sb)
-            sb.sleep(5)
-
-        # 检查 URL
         try:
-            wait_for_url_change(sb, login_page_url, timeout=15)
+            wait_for_url_change(sb, login_page_url, timeout=30)
             current = sb.get_current_url()
             if '/auth/login' not in current and '/dashboard' in current:
                 print(f"✅ 登录成功！URL: {current}")
                 return True
-        except Exception:
-            pass
-
-        # 读取错误信息
-        err = get_login_error(sb)
-        if err:
-            print(f"❌ 登录失败: {err}")
-        else:
-            print("❌ 登录失败：URL 未变化，且未读到错误信息")
+            else:
+                error_msg = get_login_error(sb)
+                print(f"❌ 登录失败，当前: {current}，错误: {error_msg}")
+        except Exception as e:
+            print(f"登录过程异常: {e}")
+            err = get_login_error(sb)
+            if err:
+                print(f"页面错误信息: {err}")
 
         if attempt < max_retries - 1:
-            print(f"等待 2 秒后重试...")
+            print("等待 2 秒后重试...")
             sb.sleep(2)
 
     print(f"❌ {max_retries} 次尝试后登录仍失败")
