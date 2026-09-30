@@ -25,9 +25,6 @@ SUCCESS_KEYWORDS = ('successfully', 'avec succès', 'réussi', 'succès', '成�
 _UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÂÉÈÊËÎÏÔÙÛÜÇ"
 _LOWER = "abcdefghijklmnopqrstuvwxyzàâéèêëîïôùûüç"
 
-_NAME_CACHE = {}
-_EXPIRY_CACHE = {}
-
 
 def beijing_time_str():
     try:
@@ -92,13 +89,6 @@ def safe_click_element(sb, element, label):
         return False
 
 
-def element_text(element):
-    try:
-        return element.text.strip()
-    except Exception:
-        return ''
-
-
 def mask_email(email):
     if not email or '@' not in email:
         return email or ''
@@ -110,138 +100,6 @@ def mask_email(email):
     else:
         masked_local = f"{local[:2]}****{local[-2:]}"
     return f"{masked_local}@{domain}"
-
-
-def build_success_message(project_name, old_expiry, new_expiry):
-    return "\n".join([
-        "🇫🇷 Aclclouds 续期通知", "",
-        "✅ 续期成功",
-        f"📦 项目: {project_name}",
-        f"⏱️ 旧过期: {old_expiry}",
-        f"⏱️ 新过期: {new_expiry}",
-        f"👤 登录账户: {mask_email(EMAIL)}",
-        f"⏱️ 运行时间: {beijing_time_str()}",
-    ])
-
-
-def build_not_yet_due_message(project_name, expiry, note=''):
-    lines = [
-        "🇫🇷 Aclclouds 续期通知", "",
-        "⏳ 未到续期时间",
-        f"📦 项目: {project_name}",
-        f"⏱️ 当前过期时间: {expiry}",
-    ]
-    if note:
-        lines.append(f"📅 可续期提示: {note}")
-    lines.extend([
-        f"👤 登录账户: {mask_email(EMAIL)}",
-        f"⏱️ 运行时间: {beijing_time_str()}",
-    ])
-    return "\n".join(lines)
-
-
-def build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note):
-    lines = [
-        "🇫🇷 Aclclouds 续期通知", "",
-        f"❌ 续期状态未确认: {project_name}",
-        f"👤 登录账户: {mask_email(EMAIL)}",
-    ]
-    if old_expiry:
-        lines.append(f"旧过期: {old_expiry}")
-    lines.extend([
-        f"当前过期: {new_expiry}",
-        f"页面提示: {result_note or '未发现成功提示'}",
-    ])
-    return "\n".join(lines)
-
-
-# ==================== 详情页处理 ====================
-
-def read_detail_page_info(sb):
-    name = ''
-    expiry = ''
-    renewal_note = ''
-
-    try:
-        for h in sb.driver.find_elements(By.CSS_SELECTOR, 'h1, h2, h3'):
-            t = (h.text or '').strip()
-            if t and len(t) <= 80 \
-                    and not re.search(r'^(console|version|files|databases|schedules|users|backups|network|domains|startup|settings|activity|support|documentation|menu)$', t, re.I) \
-                    and not re.search(r'renew|time remaining', t, re.I):
-                name = t
-                break
-    except Exception:
-        pass
-
-    if not name:
-        try:
-            title = sb.get_title()
-            m = re.match(r'^([^|]+?)\s*\|', title)
-            if m:
-                name = m.group(1).strip()
-        except Exception:
-            pass
-
-    try:
-        expiry = sb.driver.execute_script('''
-            const t = document.body.innerText || '';
-            const m = t.match(/(?:Time remaining|Temps restant)[:：]\\s*([^\\n]+)/i);
-            return m ? m[1].trim() : '';
-        ''') or ''
-    except Exception:
-        pass
-
-    if not expiry:
-        try:
-            body = sb.driver.find_element(By.TAG_NAME, 'body').text
-            m = re.search(
-                r'(?:Time remaining|Temps restant)[:：]?\s*'
-                r'(\d+\s*(?:d|j|days?|jours?|h|hours?|heures?|天|小时)\s*'
-                r'\d*\s*(?:h|hours?|heures?|小时)?)',
-                body, re.I
-            )
-            if m:
-                expiry = m.group(1).strip()
-        except Exception:
-            pass
-
-    try:
-        renewal_note = sb.driver.execute_script('''
-            const t = document.body.innerText || '';
-            const m = t.match(/((?:Free|paid|Basic|Pro)[^\\n]*(?:renew|renouvel)[^\\n]*)/i);
-            return m ? m[1].trim() : '';
-        ''') or ''
-    except Exception:
-        pass
-
-    return name, expiry, renewal_note
-
-
-def find_renew_button_on_detail(sb):
-    try:
-        btns = sb.driver.find_elements(By.XPATH, '//button')
-        for b in btns:
-            try:
-                t = (b.text or '').strip()
-                if t in ('Renew', 'Renouveler', '续期', '续订') and b.is_displayed() and b.is_enabled():
-                    return b
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return None
-
-
-def should_try_renew(expiry_str):
-    if not expiry_str:
-        return False
-    m = re.match(r'(\d+)\s*(?:j|d|jour|jours|days?|天|日)\b', expiry_str, re.I)
-    if m:
-        return int(m.group(1)) <= 2
-    m = re.match(r'(\d+)\s*(?:h|heure|heures|hour|hours|小时)', expiry_str, re.I)
-    if m:
-        return int(m.group(1)) <= 48
-    return False
 
 
 # ==================== 登录相关 ====================
@@ -269,7 +127,7 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10):
             last_error = e
             continue
 
-    # ★ 兜底：如果没找到验证码，但页面上有 Sign in 按钮，认为无需验证码
+    # 兜底：没找到验证码但页面上有 Sign in 按钮，认为无需验证码
     if not clicked:
         try:
             has_login_btn = sb.driver.execute_script('''
@@ -471,16 +329,8 @@ def fill_input(sb, selector, value, label, timeout=15):
     return entered == value
 
 
-def login(sb, email, password):
-    print("开始登录流程...")
-    fill_input(sb, '#username', email, '邮箱')
-    fill_input(sb, '#password', password, '密码')
-    if not click_captcha_checkbox(sb, '登录验证码'):
-        print("⚠️ 登录验证码未完成")
-        return False
-    sb.sleep(1)
-    login_page_url = sb.get_current_url()
-    clicked = False
+def click_signin(sb):
+    """点击 Sign in 按钮"""
     for selector in ['button[type="submit"]', 'div.auth-submit-btn',
                      '//button[contains(text(), "Sign in")]',
                      '//div[contains(text(), "Sign in")]']:
@@ -488,19 +338,74 @@ def login(sb, email, password):
             sb.wait_for_element_visible(selector, timeout=5)
             scroll_to_selector(sb, selector)
             sb.click(selector)
-            clicked = True
             print(f"点击 Sign in 使用: {selector}")
-            break
+            return True
         except Exception as e:
             print(f"选择器 {selector} 失败: {e}")
-    if not clicked:
-        sb.execute_script('''
-            var els = document.querySelectorAll('div, button, a');
-            for (var el of els) {
-                if (el.textContent.trim() === 'Sign in') { el.click(); return true; }
-            }
-            return false;
+    sb.execute_script('''
+        var els = document.querySelectorAll('div, button, a');
+        for (var el of els) {
+            if (el.textContent.trim() === 'Sign in') { el.click(); return true; }
+        }
+        return false;
+    ''')
+    return False
+
+
+def dump_login_errors(sb):
+    """打印登录页上的错误信息"""
+    try:
+        errors = sb.driver.execute_script('''
+            const out = [];
+            document.querySelectorAll(
+                '.auth-error-text, .alert-danger, .error-message, ' +
+                '[class*="error"], [class*="Error"], [class*="alert"]'
+            ).forEach(el => {
+                if (el.offsetParent && el.textContent.trim()) {
+                    out.push(el.textContent.trim().slice(0, 200));
+                }
+            });
+            return out;
         ''')
+        if errors:
+            print(f"登录错误信息: {errors}")
+    except Exception:
+        pass
+
+
+def login(sb, email, password):
+    print("开始登录流程...")
+    fill_input(sb, '#username', email, '邮箱')
+    fill_input(sb, '#password', password, '密码')
+
+    # 先尝试点击验证码（可能不存在）
+    click_captcha_checkbox(sb, '登录验证码')
+
+    sb.sleep(1)
+    login_page_url = sb.get_current_url()
+
+    # ★ 第一次点击 Sign in
+    click_signin(sb)
+
+    # ★ 等待 5 秒，检查是否出现了验证码挑战
+    sb.sleep(5)
+    captcha_now = sb.driver.execute_script('''
+        const c = document.querySelector(
+            '.auth-captcha-challenge, .auth-capcha-challenge, ' +
+            '//*[contains(@class, "captcha") and contains(@class, "challenge")]'
+        );
+        return c ? c.offsetParent !== null : false;
+    ''')
+    if captcha_now:
+        print("点击 Sign in 后出现验证码挑战，处理中...")
+        handle_captcha_challenge(sb, '登录验证码', timeout=20)
+        sb.sleep(1)
+        click_signin(sb)
+        sb.sleep(5)
+
+    # 打印错误信息（如有）
+    dump_login_errors(sb)
+
     try:
         wait_for_url_change(sb, login_page_url, timeout=30)
         current = sb.get_current_url()
@@ -508,9 +413,11 @@ def login(sb, email, password):
             print(f"✅ 登录成功！URL: {current}")
             return True
         print(f"❌ 登录失败，当前: {current}")
+        dump_login_errors(sb)
         return False
     except Exception as e:
         print(f"登录过程异常: {e}")
+        dump_login_errors(sb)
         return False
 
 
@@ -538,6 +445,140 @@ def get_current_ip(proxy_server: str = "") -> str:
     response = requests.get("https://api.ip.sb/ip", proxies=proxies, timeout=15)
     response.raise_for_status()
     return response.text.strip()
+
+
+# ==================== 通知消息 ====================
+
+def build_success_message(project_name, old_expiry, new_expiry):
+    return "\n".join([
+        "🇫🇷 Aclclouds 续期通知", "",
+        "✅ 续期成功",
+        f"📦 项目: {project_name}",
+        f"⏱️ 旧过期: {old_expiry}",
+        f"⏱️ 新过期: {new_expiry}",
+        f"👤 登录账户: {mask_email(EMAIL)}",
+        f"⏱️ 运行时间: {beijing_time_str()}",
+    ])
+
+
+def build_not_yet_due_message(project_name, expiry, note=''):
+    lines = [
+        "🇫🇷 Aclclouds 续期通知", "",
+        "⏳ 未到续期时间",
+        f"📦 项目: {project_name}",
+        f"⏱️ 当前过期时间: {expiry}",
+    ]
+    if note:
+        lines.append(f"📅 可续期提示: {note}")
+    lines.extend([
+        f"👤 登录账户: {mask_email(EMAIL)}",
+        f"⏱️ 运行时间: {beijing_time_str()}",
+    ])
+    return "\n".join(lines)
+
+
+def build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note):
+    lines = [
+        "🇫🇷 Aclclouds 续期通知", "",
+        f"❌ 续期状态未确认: {project_name}",
+        f"👤 登录账户: {mask_email(EMAIL)}",
+    ]
+    if old_expiry:
+        lines.append(f"旧过期: {old_expiry}")
+    lines.extend([
+        f"当前过期: {new_expiry}",
+        f"页面提示: {result_note or '未发现成功提示'}",
+    ])
+    return "\n".join(lines)
+
+
+# ==================== 详情页处理 ====================
+
+def read_detail_page_info(sb):
+    name = ''
+    expiry = ''
+    renewal_note = ''
+
+    try:
+        for h in sb.driver.find_elements(By.CSS_SELECTOR, 'h1, h2, h3'):
+            t = (h.text or '').strip()
+            if t and len(t) <= 80 \
+                    and not re.search(r'^(console|version|files|databases|schedules|users|backups|network|domains|startup|settings|activity|support|documentation|menu)$', t, re.I) \
+                    and not re.search(r'renew|time remaining', t, re.I):
+                name = t
+                break
+    except Exception:
+        pass
+
+    if not name:
+        try:
+            title = sb.get_title()
+            m = re.match(r'^([^|]+?)\s*\|', title)
+            if m:
+                name = m.group(1).strip()
+        except Exception:
+            pass
+
+    try:
+        expiry = sb.driver.execute_script('''
+            const t = document.body.innerText || '';
+            const m = t.match(/(?:Time remaining|Temps restant)[:：]\\s*([^\\n]+)/i);
+            return m ? m[1].trim() : '';
+        ''') or ''
+    except Exception:
+        pass
+
+    if not expiry:
+        try:
+            body = sb.driver.find_element(By.TAG_NAME, 'body').text
+            m = re.search(
+                r'(?:Time remaining|Temps restant)[:：]?\s*'
+                r'(\d+\s*(?:d|j|days?|jours?|h|hours?|heures?|天|小时)\s*'
+                r'\d*\s*(?:h|hours?|heures?|小时)?)',
+                body, re.I
+            )
+            if m:
+                expiry = m.group(1).strip()
+        except Exception:
+            pass
+
+    try:
+        renewal_note = sb.driver.execute_script('''
+            const t = document.body.innerText || '';
+            const m = t.match(/((?:Free|paid|Basic|Pro)[^\\n]*(?:renew|renouvel)[^\\n]*)/i);
+            return m ? m[1].trim() : '';
+        ''') or ''
+    except Exception:
+        pass
+
+    return name, expiry, renewal_note
+
+
+def find_renew_button_on_detail(sb):
+    try:
+        btns = sb.driver.find_elements(By.XPATH, '//button')
+        for b in btns:
+            try:
+                t = (b.text or '').strip()
+                if t in ('Renew', 'Renouveler', '续期', '续订') and b.is_displayed() and b.is_enabled():
+                    return b
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def should_try_renew(expiry_str):
+    if not expiry_str:
+        return False
+    m = re.match(r'(\d+)\s*(?:j|d|jour|jours|days?|天|日)\b', expiry_str, re.I)
+    if m:
+        return int(m.group(1)) <= 2
+    m = re.match(r'(\d+)\s*(?:h|heure|heures|hour|hours|小时)', expiry_str, re.I)
+    if m:
+        return int(m.group(1)) <= 48
+    return False
 
 
 # ==================== 主流程 ====================
