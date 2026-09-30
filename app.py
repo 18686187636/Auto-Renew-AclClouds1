@@ -121,50 +121,97 @@ def _has_captcha_challenge(sb):
         return False
 
 
+def _find_checkbox_in_shadow_dom(sb):
+    """
+    递归遍历 Shadow DOM，查找 Cap 复选框。
+    返回 {'found': bool, 'tag': str}（元素本身无法跨 shadow boundary 返回给 Selenium，
+    所以我们用 JS 内部变量保存引用，再通过 __clickCapCheckbox() 点击）。
+    """
+    return sb.driver.execute_script('''
+        // 递归收集所有 shadow root
+        const roots = [document];
+        for (let i = 0; i < roots.length; i++) {
+            const root = roots[i];
+            const all = root.querySelectorAll('*');
+            for (const el of all) {
+                if (el.shadowRoot) roots.push(el.shadowRoot);
+            }
+        }
+
+        // 在所有 root 里查找复选框
+        for (const root of roots) {
+            // 优先 part="checkbox"
+            let cb = root.querySelector('[part="checkbox"]');
+            if (!cb) cb = root.querySelector('.checkbox');
+            if (cb) {
+                window.__capCheckbox = cb;
+                return {found: true, tag: cb.tagName, cls: (cb.className || '').toString()};
+            }
+        }
+        return {found: false};
+    ''')
+
+
+def _click_cap_checkbox_via_js(sb):
+    """点击之前在 Shadow DOM 里找到的复选框"""
+    return sb.driver.execute_script('''
+        if (!window.__capCheckbox) return false;
+        const cb = window.__capCheckbox;
+        try { cb.scrollIntoView({block: 'center', inline: 'center'}); } catch(e) {}
+        try { cb.click(); return true; } catch(e) {
+            // 有些自定义元素需要 dispatchEvent
+            try {
+                cb.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                return true;
+            } catch(e2) { return false; }
+        }
+    ''')
+
+
 def click_captcha_checkbox(sb, label='验证码', timeout=10, optional=False):
-    """勾选 Cap 复选框。点击后等 5 秒，看是否弹出挑战。
-    ★ 新增对 div.checkbox[part="checkbox"] 的支持"""
-    selectors = [
+    """勾选 Cap 复选框（支持 Shadow DOM）。点击后等 5 秒，看是否弹出挑战。"""
+    # 1) 尝试普通选择器（非 Shadow DOM 的情况）
+    regular_selectors = [
         'div.checkbox[part="checkbox"]',
         '[part="checkbox"]',
         'cap-widget div[part="checkbox"]',
         'div.auth-captcha-inner[role="checkbox"]',
-        '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
-        '//div[contains(., "I am not a robot")]//*[@role="checkbox"]',
-        '//div[contains(@class, "modal") and contains(., "Secured by ACLClouds")]//*[@role="checkbox"]',
     ]
-
     clicked = False
-    selector = None
-    for candidate in selectors:
+    for candidate in regular_selectors:
         try:
-            if candidate.startswith('/'):
-                elems = sb.driver.find_elements(By.XPATH, candidate)
-                elem = None
-                for e in elems:
-                    if e.is_displayed():
-                        elem = e
-                        break
-            else:
-                elem = sb.wait_for_element_visible(candidate, timeout=timeout)
-            if not elem or not elem.is_displayed():
+            elems = sb.driver.find_elements(By.CSS_SELECTOR, candidate)
+            elem = None
+            for e in elems:
+                if e.is_displayed():
+                    elem = e
+                    break
+            if elem is None:
                 continue
-            try:
-                sb.driver.execute_script(
-                    'arguments[0].scrollIntoView({block: "center", inline: "center"});',
-                    elem,
-                )
-                sb.sleep(0.3)
-            except Exception:
-                pass
-            # 尝试用 seleniuim 原生点击，失败则用 JS 点击
             if safe_click_element(sb, elem, f"{label} 复选框"):
-                selector = candidate
                 clicked = True
+                print(f"{label} 已勾选（常规选择器: {candidate}）")
                 break
-        except Exception as e:
+        except Exception:
             continue
 
+    # 2) 常规选择器找不到 → 递归 Shadow DOM
+    if not clicked:
+        try:
+            info = _find_checkbox_in_shadow_dom(sb)
+        except Exception as e:
+            print(f"{label} Shadow DOM 搜索失败: {e}")
+            info = {'found': False}
+
+        if info.get('found'):
+            print(f"{label} 在 Shadow DOM 找到复选框 <{info.get('tag')}> cls='{info.get('cls')}'")
+            if _click_cap_checkbox_via_js(sb):
+                clicked = True
+                print(f"{label} 已勾选（Shadow DOM 点击）")
+            else:
+                print(f"{label} Shadow DOM 点击失败")
+
+    # 3) 还没找到
     if not clicked:
         if optional:
             print(f"{label} 未找到复选框，等 5 秒看是否静默通过...")
@@ -177,27 +224,15 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10, optional=False):
         print(f"{label} 未找到复选框")
         return False
 
-    print(f"{label} 已勾选，等待 5 秒...")
+    # 4) 已勾选，等 5 秒看是否弹出挑战
+    print(f"{label} 等待 5 秒...")
     sb.sleep(5)
 
-    # 5 秒后：有挑战就处理，没挑战视为通过
     if _has_captcha_challenge(sb):
         print(f"{label} 弹出挑战，处理中...")
         return handle_captcha_challenge(sb, label, timeout=20)
 
-    # 检查 aria-checked 状态
-    try:
-        if selector and not selector.startswith('/'):
-            checked = sb.get_attribute(selector, 'aria-checked')
-            if checked == 'true':
-                print(f"{label} 复选框已勾选，无需挑战")
-            else:
-                print(f"{label} 未弹出挑战，视为静默通过")
-        else:
-            print(f"{label} 未弹出挑战，视为静默通过")
-    except Exception:
-        print(f"{label} 未弹出挑战，视为静默通过")
-
+    print(f"{label} 未弹出挑战，视为静默通过")
     return True
 
 
@@ -404,7 +439,7 @@ def fill_input(sb, selector, value, label, timeout=15):
 
 
 def click_signin(sb):
-    """点击提交按钮。★ 新增 button.auth-submit-btn 和 Se connecter 文本"""
+    """点击提交按钮（支持法语 Se connecter）"""
     for selector in [
         'button[type="submit"]',
         'button.auth-submit-btn',
@@ -463,7 +498,7 @@ def login(sb, email, password):
     if not fill_input(sb, '#password', password, '密码'):
         print("⚠️ 密码仍未能正确填入。")
 
-    # 勾选 Cap 复选框（新 DOM 结构），等 5 秒看是否弹出挑战
+    # 勾选 Cap 复选框（支持 Shadow DOM），等 5 秒看是否弹出挑战
     click_captcha_checkbox(sb, '登录验证码', timeout=8, optional=True)
 
     sb.sleep(1)
