@@ -104,7 +104,8 @@ def mask_email(email):
 
 # ==================== 登录相关 ====================
 
-def click_captcha_checkbox(sb, label='验证码', timeout=10):
+def click_captcha_checkbox(sb, label='验证码', timeout=20):
+    """★ 修改：timeout 默认 20 秒；不再"未找到就跳过"，未找到直接返回 False"""
     selectors = [
         'div.auth-captcha-inner[role="checkbox"]',
         '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
@@ -128,29 +129,7 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10):
             continue
 
     if not clicked:
-        try:
-            has_login_btn = sb.driver.execute_script('''
-                const btns = document.querySelectorAll(
-                    'button[type="submit"], div.auth-submit-btn'
-                );
-                for (const b of btns) {
-                    if (b.offsetParent) return true;
-                }
-                for (const b of document.querySelectorAll('button, div, a')) {
-                    if ((b.textContent || '').trim() === 'Sign in' && b.offsetParent) {
-                        return true;
-                    }
-                }
-                return false;
-            ''')
-        except Exception:
-            has_login_btn = False
-
-        if has_login_btn:
-            print(f"{label} 未出现，判断当前无需验证码，继续登录")
-            return True
-
-        print(f"{label} 点击复选框失败: {last_error}")
+        print(f"{label} 未找到验证码复选框: {last_error}")
         return False
 
     sb.sleep(5)
@@ -350,68 +329,90 @@ def click_signin(sb):
     return False
 
 
-def dump_login_errors(sb):
+def get_login_error(sb):
+    """★ 新增：读取登录页错误信息"""
     try:
-        errors = sb.driver.execute_script('''
-            const out = [];
-            document.querySelectorAll(
-                '.auth-error-text, .alert-danger, .error-message, ' +
-                '[class*="error"], [class*="Error"], [class*="alert"]'
-            ).forEach(el => {
-                if (el.offsetParent && el.textContent.trim()) {
-                    out.push(el.textContent.trim().slice(0, 200));
+        return sb.driver.execute_script('''
+            const els = document.querySelectorAll(
+                '.auth-error-text, .alert-danger, .error-message, [class*="error"], [class*="Error"]'
+            );
+            for (const el of els) {
+                if (el.offsetParent) {
+                    const t = (el.textContent || '').trim();
+                    if (t) return t;
                 }
-            });
-            return out;
-        ''')
-        if errors:
-            print(f"登录错误信息: {errors}")
+            }
+            return '';
+        ''') or ''
     except Exception:
-        pass
+        return ''
 
 
-def login(sb, email, password):
-    print("开始登录流程...")
-    fill_input(sb, '#username', email, '邮箱')
-    fill_input(sb, '#password', password, '密码')
+def login(sb, email, password, max_retries=3):
+    """★ 修改：加入 3 次重试；不再跳过验证码；每次重试重新加载登录页"""
+    for attempt in range(max_retries):
+        if attempt > 0:
+            print(f"🔄 登录重试 #{attempt + 1}/{max_retries}")
+            sb.open(f"{BASE_URL}{LOGIN_PATH}")
+            sb.wait_for_ready_state_complete()
+            sb.sleep(2)
 
-    click_captcha_checkbox(sb, '登录验证码')
+        print(f"开始登录流程（尝试 {attempt + 1}/{max_retries}）...")
+        fill_input(sb, '#username', email, '邮箱')
+        fill_input(sb, '#password', password, '密码')
 
-    sb.sleep(1)
-    login_page_url = sb.get_current_url()
+        # 必须成功处理验证码
+        captcha_ok = click_captcha_checkbox(sb, '登录验证码', timeout=20)
+        if not captcha_ok:
+            print("⚠️ 本次登录验证码未完成，准备重试")
+            continue
 
-    click_signin(sb)
-
-    sb.sleep(5)
-    # ★ 修复：只用 CSS 选择器，不混 XPath
-    captcha_now = sb.driver.execute_script('''
-        const sel = '.auth-captcha-challenge, .auth-capcha-challenge, ' +
-                    '[class*="captcha"][class*="challenge"]';
-        const c = document.querySelector(sel);
-        return c ? c.offsetParent !== null : false;
-    ''')
-    if captcha_now:
-        print("点击 Sign in 后出现验证码挑战，处理中...")
-        handle_captcha_challenge(sb, '登录验证码', timeout=20)
         sb.sleep(1)
+        login_page_url = sb.get_current_url()
         click_signin(sb)
         sb.sleep(5)
 
-    dump_login_errors(sb)
+        # 检查是否出现新的验证码挑战
+        try:
+            captcha_now = sb.driver.execute_script('''
+                const sel = '.auth-captcha-challenge, .auth-capcha-challenge, ' +
+                            '[class*="captcha"][class*="challenge"]';
+                const c = document.querySelector(sel);
+                return c ? c.offsetParent !== null : false;
+            ''')
+        except Exception:
+            captcha_now = False
 
-    try:
-        wait_for_url_change(sb, login_page_url, timeout=30)
-        current = sb.get_current_url()
-        if '/auth/login' not in current and '/dashboard' in current:
-            print(f"✅ 登录成功！URL: {current}")
-            return True
-        print(f"❌ 登录失败，当前: {current}")
-        dump_login_errors(sb)
-        return False
-    except Exception as e:
-        print(f"登录过程异常: {e}")
-        dump_login_errors(sb)
-        return False
+        if captcha_now:
+            print("点击 Sign in 后出现验证码挑战，处理中...")
+            handle_captcha_challenge(sb, '登录验证码', timeout=20)
+            sb.sleep(1)
+            click_signin(sb)
+            sb.sleep(5)
+
+        # 检查 URL
+        try:
+            wait_for_url_change(sb, login_page_url, timeout=15)
+            current = sb.get_current_url()
+            if '/auth/login' not in current and '/dashboard' in current:
+                print(f"✅ 登录成功！URL: {current}")
+                return True
+        except Exception:
+            pass
+
+        # 读取错误信息
+        err = get_login_error(sb)
+        if err:
+            print(f"❌ 登录失败: {err}")
+        else:
+            print("❌ 登录失败：URL 未变化，且未读到错误信息")
+
+        if attempt < max_retries - 1:
+            print(f"等待 2 秒后重试...")
+            sb.sleep(2)
+
+    print(f"❌ {max_retries} 次尝试后登录仍失败")
+    return False
 
 
 def handle_renew_antibot(sb, project_name):
@@ -616,7 +617,8 @@ def main():
                 print("❌ 未配置 EMAIL 或 PASSWORD")
                 send_telegram("⚠️ 未配置 EMAIL 或 PASSWORD。")
                 return
-            if not login(sb, EMAIL, PASSWORD):
+            if not login(sb, EMAIL, PASSWORD, max_retries=3):
+                send_telegram("⚠️ 登录失败（已重试 3 次）")
                 return
             sb.open(RENEWALS_URL)
             sb.wait_for_ready_state_complete()
